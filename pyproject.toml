@@ -1,0 +1,24 @@
+[project]
+name = "hugging-face-paper-reader-rss"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.13.4",
+    "feedgen>=1.0.0",
+    "ipykernel>=6.29.5",
+    "langchain-core>=0.3.64",
+    "langchain-deepseek>=0.1.3",
+    "markdown>=3.8.2",
+    "openai>=1.84.0",
+    "pdfminer-six>=20250506",
+    "pymupdf4llm>=0.0.24",
+    "pytest>=8.4.0",
+    "requests[socks]>=2.32.3",
+    "tqdm>=4.67.1",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
