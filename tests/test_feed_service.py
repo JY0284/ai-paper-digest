@@ -97,7 +97,7 @@ def test_summarize_url_success(monkeypatch, tmp_path: Path):
     # Inject dummy ps module into svc
     monkeypatch.setattr(svc, "ps", DummyPS)
 
-    out_path, _ = svc._summarize_url("https://example.com/paper", api_key="dummy")  # type: ignore[attr-defined]
+    out_path, _, _ = svc._summarize_url("https://example.com/paper", api_key="dummy")  # type: ignore[attr-defined]
 
     assert out_path is not None and out_path.exists()
     assert out_path.read_text(encoding="utf-8") == "the-summary"
@@ -112,5 +112,5 @@ def test_summarize_url_failure(monkeypatch):
 
     monkeypatch.setattr(svc, "ps", BadPS())
 
-    result, _ = svc._summarize_url("https://bad-url.com")  # type: ignore[attr-defined]
+    result, _, _ = svc._summarize_url("https://bad-url.com")  # type: ignore[attr-defined]
     assert result is None

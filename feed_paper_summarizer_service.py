@@ -24,10 +24,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional, Tuple
 import re
+from glob import glob
 
 from tqdm import tqdm
 import markdown
 from feedgen.feed import FeedGenerator
+import xml.etree.ElementTree as ET
 
 # ---------------------------------------------------------------------------
 # Local modules – assume we're run from the repo root or installed package
@@ -58,7 +60,7 @@ def extract_first_header(markdown_text):
 def _summarize_url(
     url: str,
     api_key: Optional[str] = None,
-) -> Tuple[Optional[Path], Optional[str]]:
+) -> Tuple[Optional[Path], Optional[str], Optional[str]]:
     """Run the full summarization pipeline for *url*.
 
     Returns the Path to the generated summary markdown and the download url for the paper, 
@@ -76,11 +78,11 @@ def _summarize_url(
         paper_subject = extract_first_header(text)
         chunks = ps.chunk_text(text)  # type: ignore[attr-defined]
 
-        f_name = paper_subject + ('_' if paper_subject else '') + pdf_path.stem + ".md"
+        f_name = pdf_path.stem + ".md"
         summary_path = ps.SUMMARY_DIR / f_name  # type: ignore[attr-defined]
         if summary_path.exists():
             _LOG.warning(f"{summary_path} existed")
-            return summary_path, pdf_url
+            return summary_path, pdf_url, paper_subject
         chunks_summary_out_path = ps.CHUNKS_SUMMARY_DIR / f_name
         summary, chunks_summary = ps.progressive_summary(  # type: ignore[attr-defined]
             chunks, summary_path=summary_path, chunk_summary_path=chunks_summary_out_path, api_key=api_key
@@ -90,12 +92,12 @@ def _summarize_url(
         summary_path.write_text(summary, encoding="utf-8")
 
         _LOG.info("✅  Done – summary saved to %s", summary_path)
-        return summary_path, pdf_url
+        return summary_path, pdf_url, paper_subject
 
     except Exception as exc:  # pylint: disable=broad-except
         _LOG.error("❌  %s – %s", url, exc)
         _LOG.exception(exc)
-        return None, None
+        return None, None, None
 
 # ---------------------------------------------------------------------------
 # Aggregate summaries → single Markdown file
@@ -125,11 +127,12 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:  # noqa: D
         description="Fetch an RSS feed, summarize each linked paper in parallel, and aggregate the results.",
     )
     p.add_argument("rss_url", help="RSS feed URL (HuggingFace papers feed, ArXiv RSS, etc.)")
-    p.add_argument("--api-key", dest="api_key", help="DeepSeek / OpenAI API key")
+    p.add_argument("--api-key", dest="api_key", help="DeepSeek API key")
     p.add_argument("--proxy", help="Proxy URL to use for PDF downloads (if needed)")
     p.add_argument("--workers", type=int, default=os.cpu_count() or 4, help="Concurrent workers (default: CPU count)")
     p.add_argument("--output", type=Path, default=Path("output.md"), help="Aggregate markdown output file")
-    p.add_argument("--rss_path", type=Path, default=Path("hugging-face-ai-papers-rss.xml"), help="RSS xml file path")
+    p.add_argument("--output_rss_path", type=Path, default=Path("hugging-face-ai-papers-rss.xml"), help="RSS xml file output path.")
+    p.add_argument("--rebuild", action="store_true", help="Whether to rebuild the rss xml file using all existing summaries.")
     p.add_argument("--debug", action="store_true", help="Verbose logging")
     return p.parse_args(argv)
 
@@ -197,14 +200,18 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
     # ------------------------------------------------------------------
     # 4. Generate rss xml file
     # ------------------------------------------------------------------
-    RSS_FILE_PATH = args.rss_path
+    RSS_FILE_PATH = args.output_rss_path
     # Step 1: Read existing RSS file if it exists
-    existing_feed = None
-    existing_items = []
-    if os.path.exists(RSS_FILE_PATH):
-        existing_feed = FeedGenerator()
-        existing_feed.load(RSS_FILE_PATH)
-        existing_items = existing_feed.entries  # Get existing entries
+    existing_entries = []
+    if not args.rebuild:
+        if os.path.exists(RSS_FILE_PATH):
+            tree = ET.parse(RSS_FILE_PATH)
+            root = tree.getroot()
+            
+            # Extract existing RSS entries (items)
+            for item in root.findall(".//item"):
+                paper_url = item.find("link").text
+                existing_entries.append(paper_url)
 
     # Step 2: Initialize a FeedGenerator for the new RSS feed
     fg = FeedGenerator()
@@ -214,34 +221,46 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
     fg.link(href='https://yourwebsite.com')  # Your site or feed URL
     fg.description('Summaries of research papers')
 
+    if args.rebuild:
+        _LOG.info("Remove current rss file and rebuild using local summaries...")
+        if os.path.exists(args.output_rss_path):
+            os.remove(args.output_rss_path)
+        papers = glob("markdown/*.md")
+        for p in papers:
+            with open(p, 'r') as f:
+                text = f.read()
+                paper_subject = extract_first_header(text)
+                pdf_url = "https://arxiv.org/pdf/" + p.split(os.path.sep)[-1].replace('.md', ".pdf")
+                summary_path = Path(p.replace('markdown/', 'summary/'))
+                if summary_path.exists():
+                    successes.append((summary_path, pdf_url, paper_subject))
+
     # Step 3: Process and add new items to the RSS feed
     new_items = []
-    for path, paper_url in successes:
+    for path, paper_url, paper_subject in successes:
         paper_summary_markdown_content = path.read_text(encoding="utf-8")
         paper_summary_html = markdown.markdown(paper_summary_markdown_content)
 
         # Check if this paper has already been added by checking the URL
-        item_exists = any(item.link == paper_url for item in existing_items)
-        
-        if not item_exists:
+        if paper_url not in existing_entries:
             # Add a new entry to the RSS feed
             entry = fg.add_entry()
-            entry.title(f"Summary of paper at {paper_url}")  # Set a meaningful title for the entry
+            entry.title(f"{paper_subject}")  # Set a meaningful title for the entry
             entry.link(href=paper_url)  # Link to the paper's URL
             entry.description(paper_summary_html)  # HTML description of the paper
             new_items.append(entry)
 
     # Step 4: Combine new items with existing ones
-    all_entries = existing_items + new_items  # Combine old and new entries
+    all_entries = new_items + existing_entries  # Combine existing and new entries
 
-    # Step 5: Keep only the latest 20 items in the RSS feed
-    fg.entries = all_entries[:20]  # Slice the list to keep only the latest 20
+    # Step 5: Keep only the latest 30 items in the RSS feed
+    fg.entries = all_entries[:30]  # Keep only the latest 30 items
 
     # Step 6: Write the updated feed back to the RSS file
     with open(RSS_FILE_PATH, 'w', encoding="utf-8") as rss_file:
         rss_file.write(fg.rss_str(pretty=True).decode('utf-8'))
 
-    _LOG.info("📢 RSS feed updated successfully.")
+    _LOG.info(f"📢 RSS feed updated {len(new_items)}(new)/{len(fg.entries)}(total) items successfully.")
         
 
     _LOG.info("✨  All done!")
