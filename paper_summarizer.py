@@ -198,7 +198,7 @@ def progressive_summary(
     if summary_path.exists():
         _LOG.info(f"Summary cache hit for {summary_path}.")
         return open(summary_path).read(), open(chunk_summary_path).read()
-    
+
     chunks = list(chunks)
 
     summaries: List[str] = [None] * len(chunks)
@@ -206,7 +206,7 @@ def progressive_summary(
     def _summarize_one(idx: int, chunk: str):
         msg = HumanMessage(
             PromptTemplate.from_file(
-                os.path.join("prompts", "chunk_summary.md")
+                os.path.join("prompts", "chunk_summary.md"), encoding="utf-8"
             ).format(chunk_content=chunk)
         )
         resp = llm_invoke([msg], api_key=api_key)
@@ -224,19 +224,20 @@ def progressive_summary(
                 summaries[i] = summary
         joined = "\n\n".join(summaries)
     else:
-        joined = open(chunk_summary_path, 'r').read()
+        joined = open(chunk_summary_path, "r").read()
 
     # Final pass
     final = llm_invoke(
         [
             AIMessage(
-                PromptTemplate.from_file(os.path.join("prompts", "summary.md")).format()
+                PromptTemplate.from_file(
+                    os.path.join("prompts", "summary.md"), encoding="utf-8"
+                ).format()
             ),
             HumanMessage(joined),
         ],
         api_key=api_key,
     )
-
 
     return final.content, joined
 
@@ -281,7 +282,9 @@ def main() -> None:
         _LOG.info("Split into %d chunks", len(chunks))
 
         summary_path = SUMMARY_DIR / (pdf_path.stem + ".md")
-        summary = progressive_summary(chunks, summary_path=summary_path, api_key=args.api_key)
+        summary = progressive_summary(
+            chunks, summary_path=summary_path, api_key=args.api_key
+        )
         summary_path.write_text(summary.content, encoding="utf-8")
         print("\n" + "=" * 80 + "\nFINAL SUMMARY saved to:\n" + str(summary_path))
 
