@@ -9,7 +9,7 @@ wheels/
 # Virtual environments
 .venv
 
-summary/
+summary/chunks/
 markdown/
 papers/
 .ipynb_checkpoints/

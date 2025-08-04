@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.13.4",
     "feedgen>=1.0.0",
+    "flask>=3.1.1",
     "ipykernel>=6.29.5",
     "langchain-core>=0.3.64",
     "langchain-deepseek>=0.1.3",
