@@ -135,8 +135,11 @@ def extract_markdown(pdf_path: Path, md_dir: Path = MD_DIR) -> Path:
 
     if md_path.exists():
         return md_path
-
-    md_text = pymupdf4llm.to_markdown(str(pdf_path))
+    try:
+        md_text = pymupdf4llm.to_markdown(str(pdf_path))
+    except Exception as e:
+        logging.error(f"PDF to Markdown failed. {pdf_path}")
+        raise e
     md_path.write_text(md_text, encoding="utf-8")
     return md_path
 

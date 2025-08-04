@@ -60,6 +60,7 @@ def extract_first_header(markdown_text):
 def _summarize_url(
     url: str,
     api_key: Optional[str] = None,
+    max_input_char: int = 50000,
 ) -> Tuple[Optional[Path], Optional[str], Optional[str]]:
     """Run the full summarization pipeline for *url*.
 
@@ -76,6 +77,10 @@ def _summarize_url(
 
         text = md_path.read_text(encoding="utf-8")
         paper_subject = extract_first_header(text)
+        text = re.sub(r'\^\[\d+\](.*\n)+', '', text) # remove references
+        if max_input_char > 0:
+            text = text[:max_input_char]
+
         chunks = ps.chunk_text(text)  # type: ignore[attr-defined]
 
         f_name = pdf_path.stem + ".md"
@@ -84,6 +89,7 @@ def _summarize_url(
             _LOG.warning(f"{summary_path} existed")
             return summary_path, pdf_url, paper_subject
         chunks_summary_out_path = ps.CHUNKS_SUMMARY_DIR / f_name
+        logging.info(f"Start summarizing {md_path}...")
         summary, chunks_summary = ps.progressive_summary(  # type: ignore[attr-defined]
             chunks, summary_path=summary_path, chunk_summary_path=chunks_summary_out_path, api_key=api_key
         )
@@ -96,7 +102,7 @@ def _summarize_url(
 
     except Exception as exc:  # pylint: disable=broad-except
         _LOG.error("❌  %s – %s", url, exc)
-        _LOG.exception(exc)
+        # _LOG.exception(exc)
         return None, None, None
 
 # ---------------------------------------------------------------------------
@@ -134,6 +140,7 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:  # noqa: D
     p.add_argument("--output_rss_path", type=Path, default=Path("hugging-face-ai-papers-rss.xml"), help="RSS xml file output path.")
     p.add_argument("--rebuild", action="store_true", help="Whether to rebuild the rss xml file using all existing summaries.")
     p.add_argument("--debug", action="store_true", help="Verbose logging")
+    p.add_argument("--input-char-limit", dest="max_input_char", default=100000, help="Max allowed number of input chars")
     return p.parse_args(argv)
 
 # ---------------------------------------------------------------------------
@@ -178,7 +185,12 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(_summarize_url, link, api_key=args.api_key): idx
+            pool.submit(
+                _summarize_url,
+                link,
+                api_key=args.api_key,
+                max_input_char=args.max_input_char,
+            ): idx
             for idx, link in enumerate(links)
         }
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Summaries:"):
@@ -207,7 +219,7 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
         if os.path.exists(RSS_FILE_PATH):
             tree = ET.parse(RSS_FILE_PATH)
             root = tree.getroot()
-            
+
             # Extract existing RSS entries (items)
             for item in root.findall(".//item"):
                 paper_url = item.find("link").text
@@ -261,7 +273,6 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
         rss_file.write(fg.rss_str(pretty=True).decode('utf-8'))
 
     _LOG.info(f"📢 RSS feed updated {len(new_items)}(new)/{len(fg.entries)}(total) items successfully.")
-        
 
     _LOG.info("✨  All done!")
 
