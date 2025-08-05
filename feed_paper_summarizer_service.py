@@ -239,7 +239,7 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
             os.remove(args.output_rss_path)
         papers = glob("markdown/*.md")
         for p in papers:
-            with open(p, 'r') as f:
+            with open(p, 'r', encoding='utf-8') as f:
                 text = f.read()
                 paper_subject = extract_first_header(text)
                 pdf_url = "https://arxiv.org/pdf/" + p.split(os.path.sep)[-1].replace('.md', ".pdf")

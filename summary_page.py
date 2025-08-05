@@ -14,9 +14,15 @@ from flask import (
     redirect,
     url_for,
 )
+from werkzeug.middleware.proxy_fix import ProxyFix
 import markdown
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(
+        app.wsgi_app,
+        x_proto = 1,     # trust 1 hop for X-Forwarded-Proto
+        x_host  = 1,     # trust 1 hop for X-Forwarded-Host
+        x_prefix= 1)     # <-- pay attention to X-Forwarded-Prefix
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -107,13 +113,13 @@ INDEX_TEMPLATE = """<!doctype html>
 <html lang='en'>
 <head>
   <meta charset='utf-8'>
-  <title>ArXiv Paper Summaries</title>
+  <title>ArXiv最新AI论文速览</title>
   <meta name='viewport' content='width=device-width,initial-scale=1'>
   <style>{{ css }}</style>
 </head>
 <body>
 <header>
-  <h1><a href='{{ url_for("index") }}'>📚 ArXiv Paper Summaries</a></h1>
+  <h1><a href='{{ url_for("index") }}'>📚 ArXiv最新AI论文速览</a></h1>
   {% if uid %}
     <div style='display:flex;align-items:center;gap:0.5rem;'>
       <span style='font-size:0.9rem;'>User: <strong>{{ uid }}</strong></span>
@@ -155,14 +161,14 @@ function togglePreview(link){
 function markRead(link){
   const art = link.closest('article');
   const id = art.getAttribute('data-id');
-  fetch(`/mark_read/${id}`, {method:'POST'}).then(r=>{
+  fetch(`mark_read/${id}`, {method:'POST'}).then(r=>{
     if(r.ok){ art.remove(); }
   });
 }
 
 // Reset read status
 function resetAll(){
-  fetch('/reset', {method:'POST'}).then(r=>{ if(r.ok) location.reload(); });
+  fetch('reset', {method:'POST'}).then(r=>{ if(r.ok) location.reload(); });
 }
 
 document.addEventListener('click', ev=>{
@@ -268,4 +274,4 @@ def raw_markdown(arxiv_id):
 
 if __name__ == "__main__":
     print(f"✅ Serving summaries from {SUMMARY_DIR.resolve()}")
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 12580)), debug=True)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 22581)), debug=True)
