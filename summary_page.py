@@ -54,17 +54,26 @@ def render_markdown(md_text: str) -> str:
 def get_entries():
     """Return list of summary files sorted by modified-time (desc)."""
     entries: list[dict] = []
+
     for path in SUMMARY_DIR.glob("*.md"):
         stat = path.stat()
         updated = datetime.fromtimestamp(stat.st_mtime)
-        with path.open("r", encoding="utf-8", errors="ignore") as fh:
-            snippet_lines = [fh.readline() for _ in range(40)]
-        snippet_md = "".join(snippet_lines)
-        preview_html = render_markdown(snippet_md)
-        entries.append({"id": path.stem, "updated": updated, "preview_html": preview_html})
+
+        # ⬇️  Read the *whole* file instead of the first 40 lines
+        md_text = path.read_text(encoding="utf-8", errors="ignore")
+        preview_html = render_markdown(md_text)
+
+        entries.append(
+            {
+                "id": path.stem,
+                "updated": updated,
+                "preview_html": preview_html,
+            }
+        )
 
     entries.sort(key=lambda e: e["updated"], reverse=True)
     return entries
+
 
 
 # ------------------------- user-state helpers ---------------------------------
@@ -99,7 +108,7 @@ main{max-width:980px;margin:auto;padding:2rem 1rem 4rem;}
 article{background:#fff;border-radius:1rem;box-shadow:0 4px 12px rgba(0,0,0,0.06);padding:2rem 2.5rem;margin-bottom:2rem;position:relative;}
 article h2{margin:0 0 0.5rem 0;font-size:1.35rem;}
 .preview-html{transition:max-height 0.2s ease-in-out;overflow:hidden;}
-.preview-html.collapsed{max-height:12rem;}
+.preview-html.collapsed{max-height:20rem;}
 .toggle-link{cursor:pointer;font-size:0.9rem;user-select:none;}
 .card-actions{margin-top:0.75rem;font-size:0.9rem;color:#666;}
 .card-actions a{margin-right:0.75rem;cursor:pointer;}
@@ -113,13 +122,13 @@ INDEX_TEMPLATE = """<!doctype html>
 <html lang='en'>
 <head>
   <meta charset='utf-8'>
-  <title>ArXiv最新AI论文速览</title>
+  <title>arXiv最新AI论文速览速学</title>
   <meta name='viewport' content='width=device-width,initial-scale=1'>
   <style>{{ css }}</style>
 </head>
 <body>
 <header>
-  <h1><a href='{{ url_for("index") }}'>📚 ArXiv最新AI论文速览</a></h1>
+  <h1><a href='{{ url_for("index") }}'>📚 arXiv最新AI论文速览速学</a></h1>
   {% if uid %}
     <div style='display:flex;align-items:center;gap:0.5rem;'>
       <span style='font-size:0.9rem;'>User: <strong>{{ uid }}</strong></span>
