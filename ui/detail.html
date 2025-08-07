@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang='en'>
+
+<head>
+    <meta charset='utf-8'>
+    <meta name='viewport' content='width=device-width,initial-scale=1'>
+    <title>{{ arxiv_id }} – Summary</title>
+    <style>
+        {{ css }}
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1><a href='{{ url_for("index") }}'>← 返回列表</a></h1>
+    </header>
+    <main>
+        <article class='markdown-body'>
+            {{ content | safe }}
+        </article>
+        <p style='text-align:center;margin-top:2rem;'>
+            <a target='_blank' href='https://arxiv.org/pdf/{{ arxiv_id }}.pdf'>📄 打开原文 PDF</a>
+        </p>
+    </main>
+</body>
+
+</html>

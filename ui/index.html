@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang='en'>
+
+<head>
+  <meta charset='utf-8'>
+  <title>arXiv最新AI论文速览速学</title>
+  <meta name='viewport' content='width=device-width,initial-scale=1'>
+  <style>
+    {{ css }}
+  </style>
+</head>
+
+
+<body>
+  <header style="display:flex;align-items:center;justify-content:space-between;gap:1rem;">
+    <h1 style="margin:0;"><a href='{{ url_for("index") }}'>📚 arXiv最新AI论文速览速学</a></h1>
+    <div style="display:flex;align-items:center;gap:1.2rem;">
+      {% if uid %}
+        <span style='font-size:0.95rem;'>👤 <strong>{{ uid }}</strong></span>
+        <a href="{{ url_for('read_papers') }}" class="topbar-btn">📖 查看已读论文</a>
+        <button id='logout-btn' class="topbar-btn">退出登录</button>
+      {% else %}
+        <form id='user-form' method='POST' action='{{ url_for("set_user") }}' style="display:flex;align-items:center;gap:0.5rem;">
+          <input name='uid' placeholder='输入ID/用户名' required style="padding:0.25rem 0.5rem;border-radius:4px;border:none;font-size:0.85rem;">
+          <button type='submit' class="topbar-btn">进入</button>
+        </form>
+      {% endif %}
+    </div>
+  </header>
+  <main>   
+    {% if show_read %}
+    <div style="margin-bottom:0.7rem;text-align:center;">
+      <span style="font-size:1.1rem;">📖 我的已读论文</span>
+      <a href="{{ url_for('index') }}" style="margin-left:1.5rem;font-size:0.95rem;">← 返回首页</a>
+    </div>
+    {% endif %}
+    {% if uid and read_total is not none and read_today is not none and unread_count is not none and not show_read %}
+    <div id="info-bar" style="margin-bottom:1.2rem;padding:0.6rem 1.2rem;background:#f5f8fa;border-radius:6px;font-size:1.08rem;display:flex;align-items:center;gap:1.5rem;justify-content:center;">
+      <span>已读 <strong>{{ read_total }}</strong></span>
+      <span>今日 <strong>{{ read_today }}</strong></span>
+      <span>未读 <strong>{{ unread_count }}</strong></span>
+    </div>
+    {% endif %}
+    {% for e in entries %}
+    <article data-id='{{ e.id }}'>
+      <h2><a href='{{ url_for("view_summary", arxiv_id=e.id) }}'>{{ e.id }}</a></h2>
+      <div class='preview-html collapsed'>{{ e.preview_html | safe }}</div>
+      <div class='card-actions'>
+        <a class='toggle-link action-btn'>展开</a>
+        {% if show_read %}
+          <a class='remove-read-link action-btn'>从已读列表移除</a>
+        {% else %}
+          {% if uid %}<a class='mark-read-link action-btn'>标记为已读</a>{% else %}<a class='mark-read-link action-btn disabled'>标记为已读</a>{% endif %}
+        {% endif %}
+        <a target='_blank' href='https://arxiv.org/pdf/{{ e.id }}.pdf' class='action-btn'>打开原文 PDF</a>
+      </div>
+      <p class='muted'>更新时间：{{ e.updated.strftime('%Y-%m-%d %H:%M') }}</p>
+    </article>
+    {% else %}
+    <p>没有未读论文摘要。</p>
+    {% endfor %}
+  </main>
+  <script>
+      /* ===== tiny toast helper ===== */
+      function showToast(msg, duration = 3000) {
+        let toast = document.getElementById('toast');
+        if (!toast) {
+          toast = document.createElement('div');
+          toast.id = 'toast';
+          document.body.appendChild(toast);
+        }
+        toast.textContent = msg;
+        toast.classList.add('show');
+
+        clearTimeout(showToast.timer);
+        showToast.timer = setTimeout(() => toast.classList.remove('show'), duration);
+      }
+      // Expand / collapse preview blocks
+      function togglePreview(link) {
+        const art = link.closest('article');
+        const prev = art.querySelector('.preview-html');
+        prev.classList.toggle('collapsed');
+        link.textContent = prev.classList.contains('collapsed') ? '展开' : '收起';
+      }
+
+    // Mark summary as read and hide card
+    function markRead(link) {
+      const art = link.closest('article');
+      const id = art.getAttribute('data-id');
+      fetch(`mark_read/${id}`, { method: 'POST' }).then(r => {
+        if (r.ok) {
+          art.remove();
+          // Update read/unread counts
+          updateInfoBarCounts(-1, 1);
+        }
+      });
+    }
+
+    // Remove from read list
+    function removeFromRead(link) {
+      const art = link.closest('article');
+      const id = art.getAttribute('data-id');
+      fetch(`unmark_read/${id}`, { method: 'POST' }).then(r => {
+        if (r.ok) {
+          art.remove();
+        }
+      });
+    }
+
+    // Update info bar counts: unreadDelta, readDelta
+    function updateInfoBarCounts(unreadDelta, readDelta) {
+      const infoBar = document.getElementById('info-bar');
+      if (infoBar) {
+        const spans = infoBar.querySelectorAll('span');
+        if (spans.length >= 3) {
+          let readSpan = spans[0].querySelector('strong');
+          let todaySpan = spans[1].querySelector('strong');
+          let unreadSpan = spans[2].querySelector('strong');
+          if (readSpan && unreadSpan) {
+            let read = parseInt(readSpan.textContent, 10);
+            let unread = parseInt(unreadSpan.textContent, 10);
+            if (!isNaN(read) && !isNaN(unread)) {
+              readSpan.textContent = read + readDelta;
+              unreadSpan.textContent = Math.max(0, unread + unreadDelta);
+            }
+          }
+          // Update today count if needed
+          if (todaySpan) {
+            let today = parseInt(todaySpan.textContent, 10);
+            if (!isNaN(today)) {
+              todaySpan.textContent = today + readDelta;
+            }
+          }
+        }
+      }
+    }
+
+    // Reset read status
+    function resetAll() {
+      fetch('reset', { method: 'POST' }).then(r => { if (r.ok) location.reload(); });
+    }
+
+    // Logout function
+    function logout() {
+      document.cookie = 'uid=; Max-Age=0; path=/';
+      location.reload();
+    }
+
+    document.addEventListener('click', ev => {
+      
+      if (ev.target.id === 'logout-btn') { ev.preventDefault(); logout(); return; }
+      if (ev.target.matches('.toggle-link')) { ev.preventDefault(); togglePreview(ev.target); }
+      
+      // Handle mark-read-link clicks (both disabled and enabled)
+      // Check if the clicked element or any of its parents has the mark-read-link class
+      let markReadElement = ev.target.closest('.mark-read-link');
+      if (markReadElement) {
+        ev.preventDefault();
+        
+        // Check if user is logged in by checking if the element has 'disabled' class
+        if (markReadElement.classList.contains('disabled')) {
+          showToast('需要登录，\n登录只需输入任意用户名😄');
+        } else {
+          markRead(markReadElement);
+        }
+        return;
+      }
+        
+      if (ev.target.matches('.remove-read-link')) {
+        ev.preventDefault(); removeFromRead(ev.target); }
+      if (ev.target.id === 'reset-btn') { ev.preventDefault(); resetAll(); }
+    });
+  </script>
+</body>
+
+</html>
