@@ -97,9 +97,9 @@ def save_read_set(uid: str, read_set: set[str]):
 # Templates (plain strings — no Python f-strings)                               
 # -----------------------------------------------------------------------------
 
-BASE_CSS = open('ui/base.css', 'r').read()
-INDEX_TEMPLATE = open('ui/index.html', 'r').read()
-DETAIL_TEMPLATE = open('ui/detail.html', 'r').read()
+BASE_CSS = open(os.path.join('ui', 'base.css'), 'r', encoding='utf-8').read()
+INDEX_TEMPLATE = open(os.path.join('ui', 'index.html'), 'r', encoding='utf-8').read()
+DETAIL_TEMPLATE = open(os.path.join('ui', 'detail.html'), 'r', encoding='utf-8').read()
 
 # -----------------------------------------------------------------------------
 # Routes

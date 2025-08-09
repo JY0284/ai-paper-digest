@@ -13,3 +13,6 @@ summary/chunks/
 markdown/
 papers/
 .ipynb_checkpoints/
+output.md
+hugging-face-ai-papers-rss.xml
+summary/
