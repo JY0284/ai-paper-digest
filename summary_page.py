@@ -1,7 +1,7 @@
 import os
 import json
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 
 from flask import (
     Flask,
@@ -82,16 +82,71 @@ def _user_file(uid: str) -> Path:
     return USER_DATA_DIR / f"{uid}.json"
 
 
-def load_read_set(uid: str) -> set[str]:
+def load_user_data(uid: str) -> dict:
+    """Load full user data structure with backward compatibility.
+
+    Shape:
+    {
+      "read": {arxiv_id: "YYYY-MM-DD" | null, ...},
+      "events": [ {"ts": ISO8601, "type": str, "arxiv_id": str|None, "meta": dict|None, "path": str|None, "ua": str|None}, ... ]
+    }
+    """
     try:
         data = json.loads(_user_file(uid).read_text())
-        return set(data.get("read", []))
     except (FileNotFoundError, json.JSONDecodeError):
-        return set()
+        data = {}
+
+    # migrate legacy list-based read
+    raw_read = data.get("read", {})
+    if isinstance(raw_read, list):
+        read_map = {str(rid): None for rid in raw_read}
+    elif isinstance(raw_read, dict):
+        read_map = {str(k): v for k, v in raw_read.items()}
+    else:
+        read_map = {}
+
+    events = data.get("events")
+    if not isinstance(events, list):
+        events = []
+
+    return {"read": read_map, "events": events}
 
 
-def save_read_set(uid: str, read_set: set[str]):
-    _user_file(uid).write_text(json.dumps({"read": sorted(read_set)}), encoding="utf-8")
+def load_read_map(uid: str) -> dict[str, str | None]:
+    data = load_user_data(uid)
+    return data.get("read", {})
+
+
+def save_user_data(uid: str, data: dict) -> None:
+    _user_file(uid).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def save_read_map(uid: str, read_map: dict[str, str | None]):
+    """Persist read map, preserving other fields (like events)."""
+    data = load_user_data(uid)
+    data["read"] = read_map
+    save_user_data(uid, data)
+
+
+def append_event(uid: str, event_type: str, arxiv_id: str | None = None, meta: dict | None = None, ts: str | None = None):
+    """Append a single analytics event for the user.
+
+    If ts is provided (ISO 8601, preferably with timezone offset), it will be
+    used. Otherwise, we store the server local timezone timestamp with offset.
+    """
+    data = load_user_data(uid)
+    evt = {
+        "ts": ts or datetime.now().astimezone().isoformat(timespec="seconds"),
+        "type": event_type,
+        "arxiv_id": arxiv_id,
+        "meta": meta or {},
+        "path": request.path if request else None,
+        "ua": request.headers.get("User-Agent") if request else None,
+    }
+    data.setdefault("events", []).append(evt)
+    save_user_data(uid, data)
 
 # -----------------------------------------------------------------------------
 # Templates (plain strings — no Python f-strings)                               
@@ -113,19 +168,23 @@ def index():
     read_total = None
     read_today = None
     if uid:
-        read_set = load_read_set(uid)
-        unread_count = len([e for e in entries if e["id"] not in read_set])
-        entries = [e for e in entries if e["id"] not in read_set]
-        read_total = len(read_set)
-        # Count how many read today
-        today = date.today()
+        read_map = load_read_map(uid)
+        read_ids = set(read_map.keys())
+        unread_count = len([e for e in entries if e["id"] not in read_ids])
+        entries = [e for e in entries if e["id"] not in read_ids]
+        read_total = len(read_ids)
+        # Count how many read today, based on stored per-paper read date/time (YYYY-MM-DD[THH:MM:SS])
+        today_iso = date.today().isoformat()
         read_today = 0
-        for rid in read_set:
-            summary_path = SUMMARY_DIR / f"{rid}.md"
-            if summary_path.exists():
-                mtime = datetime.fromtimestamp(summary_path.stat().st_mtime)
-                if mtime.date() == today:
+        for d in read_map.values():
+            if not d:
+                continue
+            try:
+                # match date prefix for both date-only and datetime strings
+                if str(d).split('T', 1)[0] == today_iso:
                     read_today += 1
+            except Exception:
+                continue
     resp = make_response(render_template_string(INDEX_TEMPLATE, entries=entries, uid=uid, css=BASE_CSS, unread_count=unread_count, read_total=read_total, read_today=read_today))
     return resp
 
@@ -145,9 +204,10 @@ def mark_read(arxiv_id):
     uid = request.cookies.get("uid")
     if not uid:
         return jsonify({"error": "no-uid"}), 400
-    read_set = load_read_set(uid)
-    read_set.add(arxiv_id)
-    save_read_set(uid, read_set)
+    read_map = load_read_map(uid)
+    # store local date-time with timezone offset for more precise analytics
+    read_map[str(arxiv_id)] = datetime.now().astimezone().isoformat(timespec="seconds")
+    save_read_map(uid, read_map)
     return jsonify({"status": "ok"})
 
 
@@ -156,9 +216,9 @@ def unmark_read(arxiv_id):
     uid = request.cookies.get("uid")
     if not uid:
         return jsonify({"error": "no-uid"}), 400
-    read_set = load_read_set(uid)
-    read_set.discard(arxiv_id)
-    save_read_set(uid, read_set)
+    read_map = load_read_map(uid)
+    read_map.pop(str(arxiv_id), None)
+    save_read_map(uid, read_map)
     return jsonify({"status": "ok"})
 
 
@@ -180,6 +240,7 @@ def view_summary(arxiv_id):
     if not md_path.exists():
         abort(404)
     md_text = md_path.read_text(encoding="utf-8", errors="ignore")
+    uid = request.cookies.get("uid")
     html_content = render_markdown(md_text)
     return render_template_string(DETAIL_TEMPLATE, content=html_content, arxiv_id=arxiv_id, css=BASE_CSS)
 
@@ -197,10 +258,57 @@ def read_papers():
     uid = request.cookies.get("uid")
     if not uid:
         return redirect(url_for("index"))
-    read_set = load_read_set(uid)
+    read_map = load_read_map(uid)
     entries = get_entries()
-    read_entries = [e for e in entries if e["id"] in read_set]
+    read_entries = [e for e in entries if e["id"] in set(read_map.keys())]
     return render_template_string(INDEX_TEMPLATE, entries=read_entries, uid=uid, css=BASE_CSS, unread_count=None, read_total=None, read_today=None, show_read=True)
+
+
+@app.route("/event", methods=["POST"])
+def ingest_event():
+    uid = request.cookies.get("uid")
+    if not uid:
+        return jsonify({"error": "no-uid"}), 400
+    try:
+        payload = request.get_json(silent=True)
+        if payload is None:
+            raw = request.get_data(as_text=True) or "{}"
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                payload = {}
+        etype = str(payload.get("type", "")).strip()
+        arxiv_id = payload.get("arxiv_id")
+        meta = payload.get("meta") or {}
+        ts_client = payload.get("ts")
+        tz_off_min = payload.get("tz_offset_min")  # minutes where UTC - local
+        # keep only click events
+        allowed = {"mark_read", "unmark_read", "open_pdf", "login", "logout", "reset", "read_list", "read_more"}
+        if etype in allowed:
+            ts_local: str | None = None
+            try:
+                if ts_client:
+                    # parse client ts and adjust to local timezone if offset provided
+                    # accept 'Z' by replacing with +00:00
+                    dt_utc = datetime.fromisoformat(str(ts_client).replace('Z', '+00:00'))
+                    if isinstance(tz_off_min, int):
+                        tz = timezone(timedelta(minutes=-tz_off_min))
+                        dt_local = dt_utc.astimezone(tz)
+                        ts_local = dt_local.isoformat(timespec="seconds")
+                    else:
+                        ts_local = dt_utc.astimezone().isoformat(timespec="seconds")
+            except Exception:
+                ts_local = None
+            append_event(
+                uid,
+                etype,
+                arxiv_id=str(arxiv_id) if arxiv_id else None,
+                meta=meta,
+                ts=ts_local,
+            )
+        return jsonify({"status": "ok"})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
 
 # -----------------------------------------------------------------------------
 # Entry point

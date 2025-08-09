@@ -19,9 +19,17 @@
             {{ content | safe }}
         </article>
         <p style='text-align:center;margin-top:2rem;'>
-            <a target='_blank' href='https://arxiv.org/pdf/{{ arxiv_id }}.pdf'>📄 打开原文 PDF</a>
+            <a id='pdf-link' target='_blank' href='https://arxiv.org/pdf/{{ arxiv_id }}.pdf'>📄 打开原文 PDF</a>
         </p>
     </main>
+    <script>
+      // pdf click event (core)
+      document.getElementById('pdf-link')?.addEventListener('click', (ev) => {
+        const href = ev.currentTarget.getAttribute('href');
+        const payload = {type:'open_pdf', arxiv_id: '{{ arxiv_id }}', meta:{href}, ts: new Date().toISOString(), tz_offset_min: new Date().getTimezoneOffset()};
+        navigator.sendBeacon('/event', JSON.stringify(payload));
+      });
+    </script>
 </body>
 
 </html>

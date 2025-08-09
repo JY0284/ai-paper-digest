@@ -81,6 +81,10 @@
         const prev = art.querySelector('.preview-html');
         prev.classList.toggle('collapsed');
         link.textContent = prev.classList.contains('collapsed') ? '展开' : '收起';
+        // click event: read more / collapse
+        const id = art.getAttribute('data-id');
+        const payload = {type:'read_more', arxiv_id:id, meta:{collapsed: prev.classList.contains('collapsed')}, ts: new Date().toISOString(), tz_offset_min: new Date().getTimezoneOffset()};
+        try { navigator.sendBeacon('/event', JSON.stringify(payload)); } catch(e) {}
       }
 
     // Mark summary as read and hide card
@@ -92,6 +96,9 @@
           art.remove();
           // Update read/unread counts
           updateInfoBarCounts(-1, 1);
+          // click event
+          const payload = {type:'mark_read', arxiv_id:id, ts: new Date().toISOString(), tz_offset_min: new Date().getTimezoneOffset()};
+          try { navigator.sendBeacon('/event', JSON.stringify(payload)); } catch(e) {}
         }
       });
     }
@@ -103,6 +110,9 @@
       fetch(`unmark_read/${id}`, { method: 'POST' }).then(r => {
         if (r.ok) {
           art.remove();
+          // click event
+          const payload = {type:'unmark_read', arxiv_id:id, ts: new Date().toISOString(), tz_offset_min: new Date().getTimezoneOffset()};
+          try { navigator.sendBeacon('/event', JSON.stringify(payload)); } catch(e) {}
         }
       });
     }
@@ -141,7 +151,12 @@
     }
 
     // Logout function
-    function logout() {
+      function logout() {
+      // core event (click)
+      try {
+        const payload = {type:'logout', ts: new Date().toISOString(), tz_offset_min: new Date().getTimezoneOffset()};
+        navigator.sendBeacon('/event', JSON.stringify(payload));
+      } catch(e) {}
       document.cookie = 'uid=; Max-Age=0; path=/';
       location.reload();
     }
@@ -170,6 +185,38 @@
         ev.preventDefault(); removeFromRead(ev.target); }
       if (ev.target.id === 'reset-btn') { ev.preventDefault(); resetAll(); }
     });
+
+    // login click (form submit)
+    document.getElementById('user-form')?.addEventListener('submit', () => {
+      try {
+        const payload = {type:'login', ts: new Date().toISOString(), tz_offset_min: new Date().getTimezoneOffset()};
+        navigator.sendBeacon('/event', JSON.stringify(payload));
+      } catch(e) {}
+    });
+
+    // read list click
+    document.addEventListener('click', ev => {
+      const link = ev.target.closest('a[href="/read"]');
+      if (link) {
+        try {
+          const payload = {type:'read_list', ts: new Date().toISOString(), tz_offset_min: new Date().getTimezoneOffset()};
+          navigator.sendBeacon('/event', JSON.stringify(payload));
+        } catch(e) {}
+      }
+    }, true);
+
+    // instrument PDF click (core)
+    document.addEventListener('click', ev => {
+      const link = ev.target.closest('a.action-btn[href^="https://arxiv.org/pdf/"]');
+      if (link) {
+        const art = link.closest('article');
+        const id = art ? art.getAttribute('data-id') : null;
+        const payload = {type:'open_pdf', arxiv_id:id, meta:{href: link.getAttribute('href')}, ts: new Date().toISOString(), tz_offset_min: new Date().getTimezoneOffset()};
+        navigator.sendBeacon('/event', JSON.stringify(payload));
+      }
+    }, true);
+
+    // only click events should be recorded per requirements
   </script>
 </body>
 

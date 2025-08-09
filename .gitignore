@@ -16,3 +16,4 @@ papers/
 output.md
 hugging-face-ai-papers-rss.xml
 summary/
+.DS_Store
