@@ -17,6 +17,7 @@ from flask import (
 )
 from werkzeug.middleware.proxy_fix import ProxyFix
 import markdown
+import math
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(
@@ -52,56 +53,105 @@ def render_markdown(md_text: str) -> str:
     )
 
 
-def get_entries():
-    """Return list of summary files sorted by modified-time (desc)."""
-    entries: list[dict] = []
+_ENTRIES_CACHE: dict = {
+    "meta": None,           # list of dicts without preview_html
+    "count": 0,
+    "latest_mtime": 0.0,    # max mtime among md/tag files
+}
 
-    for path in SUMMARY_DIR.glob("*.md"):
-        stat = path.stat()
-        updated = datetime.fromtimestamp(stat.st_mtime)
 
-        # ⬇️  Read the *whole* file instead of the first 40 lines
-        md_text = path.read_text(encoding="utf-8", errors="ignore")
-        preview_html = render_markdown(md_text)
+def _scan_entries_meta() -> list[dict]:
+    """Scan summary directory and build metadata for all entries (no HTML).
 
-        # try load tags saved alongside the summary
-        tags: list[str] = []
-        top_tags: list[str] = []
-        detail_tags: list[str] = []
-        tags_file = path.with_suffix("")
-        tags_file = tags_file.with_name(tags_file.name + ".tags.json")
+    Returns a list of dicts with keys: id, updated, tags, top_tags, detail_tags.
+    This function also maintains a lightweight cache to avoid re-reading tag
+    files on every request when nothing changed.
+    """
+    md_files = list(SUMMARY_DIR.glob("*.md"))
+    count = len(md_files)
+    # compute latest mtime considering the md file and its .tags.json sibling
+    latest_mtime = 0.0
+    for p in md_files:
         try:
-            if tags_file.exists():
-                data = json.loads(tags_file.read_text(encoding="utf-8"))
-                # support legacy [..], flat {"top": [...], "tags": [...]},
-                # and nested {"tags": {"top": [...], "tags": [...]}}
-                if isinstance(data, list):
-                    detail_tags = [str(t).strip().lower() for t in data if str(t).strip()]
-                elif isinstance(data, dict):
-                    container = data
-                    if isinstance(data.get("tags"), dict):
-                        container = data.get("tags") or {}
-                    if isinstance(container.get("top"), list):
-                        top_tags = [str(t).strip().lower() for t in container.get("top") if str(t).strip()]
-                    if isinstance(container.get("tags"), list):
-                        detail_tags = [str(t).strip().lower() for t in container.get("tags") if str(t).strip()]
-                tags = (top_tags or []) + (detail_tags or [])
+            latest_mtime = max(latest_mtime, p.stat().st_mtime)
+            t = p.with_suffix("")
+            t = t.with_name(t.name + ".tags.json")
+            if t.exists():
+                latest_mtime = max(latest_mtime, t.stat().st_mtime)
         except Exception:
-            tags = []
+            continue
 
-        entries.append(
-            {
-                "id": path.stem,
-                "updated": updated,
-                "preview_html": preview_html,
-                "tags": tags,
-                "top_tags": top_tags,
-                "detail_tags": detail_tags,
-            }
-        )
+    if (
+        _ENTRIES_CACHE.get("meta") is not None
+        and _ENTRIES_CACHE.get("count") == count
+        and float(_ENTRIES_CACHE.get("latest_mtime") or 0.0) >= float(latest_mtime)
+    ):
+        return list(_ENTRIES_CACHE["meta"])  # type: ignore[index]
 
-    entries.sort(key=lambda e: e["updated"], reverse=True)
-    return entries
+    entries_meta: list[dict] = []
+    for path in md_files:
+        try:
+            stat = path.stat()
+            updated = datetime.fromtimestamp(stat.st_mtime)
+
+            # load tags saved alongside the summary (no markdown rendering here)
+            tags: list[str] = []
+            top_tags: list[str] = []
+            detail_tags: list[str] = []
+            tags_file = path.with_suffix("")
+            tags_file = tags_file.with_name(tags_file.name + ".tags.json")
+            try:
+                if tags_file.exists():
+                    data = json.loads(tags_file.read_text(encoding="utf-8"))
+                    # support legacy [..], flat {"top": [...], "tags": [...]},
+                    # and nested {"tags": {"top": [...], "tags": [...]}}
+                    if isinstance(data, list):
+                        detail_tags = [str(t).strip().lower() for t in data if str(t).strip()]
+                    elif isinstance(data, dict):
+                        container = data
+                        if isinstance(data.get("tags"), dict):
+                            container = data.get("tags") or {}
+                        if isinstance(container.get("top"), list):
+                            top_tags = [str(t).strip().lower() for t in container.get("top") if str(t).strip()]
+                        if isinstance(container.get("tags"), list):
+                            detail_tags = [str(t).strip().lower() for t in container.get("tags") if str(t).strip()]
+                    tags = (top_tags or []) + (detail_tags or [])
+            except Exception:
+                tags = []
+
+            entries_meta.append(
+                {
+                    "id": path.stem,
+                    "updated": updated,
+                    "tags": tags,
+                    "top_tags": top_tags,
+                    "detail_tags": detail_tags,
+                }
+            )
+        except Exception:
+            continue
+
+    entries_meta.sort(key=lambda e: e["updated"], reverse=True)
+    _ENTRIES_CACHE["meta"] = list(entries_meta)
+    _ENTRIES_CACHE["count"] = count
+    _ENTRIES_CACHE["latest_mtime"] = latest_mtime
+    return entries_meta
+
+
+def _render_page_entries(entries_meta: list[dict]) -> list[dict]:
+    """Given a slice of entries meta, materialize preview_html for each."""
+    rendered: list[dict] = []
+    for meta in entries_meta:
+        try:
+            md_path = SUMMARY_DIR / f"{meta['id']}.md"
+            md_text = md_path.read_text(encoding="utf-8", errors="ignore")
+            preview_html = render_markdown(md_text)
+        except Exception:
+            preview_html = ""
+        item = dict(meta)
+        item["preview_html"] = preview_html
+        rendered.append(item)
+    return rendered
 
 
 
@@ -192,7 +242,7 @@ DETAIL_TEMPLATE = open(os.path.join('ui', 'detail.html'), 'r', encoding='utf-8')
 @app.route("/", methods=["GET"])
 def index():
     uid = request.cookies.get("uid")
-    entries = get_entries()
+    entries_meta = _scan_entries_meta()
     # tag filtering (from query string)
     active_tag = (request.args.get("tag") or "").strip().lower() or None
     tag_query = (request.args.get("q") or "").strip().lower()
@@ -204,8 +254,8 @@ def index():
     if uid:
         read_map = load_read_map(uid)
         read_ids = set(read_map.keys())
-        unread_count = len([e for e in entries if e["id"] not in read_ids])
-        entries = [e for e in entries if e["id"] not in read_ids]
+        unread_count = len([e for e in entries_meta if e["id"] not in read_ids])
+        entries_meta = [e for e in entries_meta if e["id"] not in read_ids]
         read_total = len(read_ids)
         # Count how many read today, based on stored per-paper read date/time (YYYY-MM-DD[THH:MM:SS])
         today_iso = date.today().isoformat()
@@ -221,7 +271,7 @@ def index():
                 continue
     # apply tag-based filters if present
     if active_tag:
-        entries = [e for e in entries if active_tag in (e.get("detail_tags") or []) or active_tag in (e.get("top_tags") or [])]
+        entries_meta = [e for e in entries_meta if active_tag in (e.get("detail_tags") or []) or active_tag in (e.get("top_tags") or [])]
     if tag_query:
         def matches_query(tags: list[str] | None, query: str) -> bool:
             if not tags:
@@ -230,14 +280,14 @@ def index():
                 if query in t:
                     return True
             return False
-        entries = [e for e in entries if matches_query(e.get("detail_tags"), tag_query) or matches_query(e.get("top_tags"), tag_query)]
+        entries_meta = [e for e in entries_meta if matches_query(e.get("detail_tags"), tag_query) or matches_query(e.get("top_tags"), tag_query)]
     if active_tops:
-        entries = [e for e in entries if any(t in (e.get("top_tags") or []) for t in active_tops)]
+        entries_meta = [e for e in entries_meta if any(t in (e.get("top_tags") or []) for t in active_tops)]
 
-    # compute tag cloud from filtered entries only
+    # compute tag cloud from filtered entries only (meta only, no HTML work)
     tag_counts: dict[str, int] = {}
     top_counts: dict[str, int] = {}
-    for e in entries:
+    for e in entries_meta:
         for t in e.get("detail_tags", []) or []:
             tag_counts[t] = tag_counts.get(t, 0) + 1
         for t in e.get("top_tags", []) or []:
@@ -257,6 +307,27 @@ def index():
     if tag_query:
         tag_cloud = [t for t in tag_cloud if tag_query in t["name"]]
 
+    # pagination
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except Exception:
+        page = 1
+    try:
+        per_page = int(request.args.get("per_page", 10))
+    except Exception:
+        per_page = 10
+    per_page = max(1, min(per_page, 30))
+    total_items = len(entries_meta)
+    total_pages = max(1, math.ceil(total_items / per_page))
+    if page > total_pages:
+        page = total_pages
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_entries = entries_meta[start:end]
+
+    # materialize preview HTML only for current page
+    entries = _render_page_entries(page_entries)
+
     resp = make_response(
         render_template_string(
             INDEX_TEMPLATE,
@@ -270,6 +341,10 @@ def index():
             top_cloud=top_cloud,
             active_tops=active_tops,
             tag_query=tag_query,
+            page=page,
+            per_page=per_page,
+            total_pages=total_pages,
+            total_items=total_items,
         )
     )
     return resp
@@ -367,13 +442,13 @@ def read_papers():
     if not uid:
         return redirect(url_for("index"))
     read_map = load_read_map(uid)
-    entries = get_entries()
-    read_entries = [e for e in entries if e["id"] in set(read_map.keys())]
+    entries_meta = _scan_entries_meta()
+    read_entries_meta = [e for e in entries_meta if e["id"] in set(read_map.keys())]
     # allow optional tag filter on read list
     active_tag = (request.args.get("tag") or "").strip().lower() or None
     tag_query = (request.args.get("q") or "").strip().lower()
     if active_tag:
-        read_entries = [e for e in read_entries if active_tag in (e.get("tags") or [])]
+        read_entries_meta = [e for e in read_entries_meta if active_tag in (e.get("tags") or []) or active_tag in (e.get("top_tags") or [])]
     if tag_query:
         def matches_query(tags: list[str] | None, query: str) -> bool:
             if not tags:
@@ -382,19 +457,39 @@ def read_papers():
                 if query in t:
                     return True
             return False
-        read_entries = [e for e in read_entries if matches_query(e.get("tags"), tag_query)]
+        read_entries_meta = [e for e in read_entries_meta if matches_query(e.get("tags"), tag_query)]
     # tag cloud for read entries
     tag_counts: dict[str, int] = {}
-    for e in read_entries:
-        for t in e.get("tags", []) or []:
+    for e in read_entries_meta:
+        for t in (e.get("tags", []) or []):
             tag_counts[t] = tag_counts.get(t, 0) + 1
     tag_cloud = sorted(
         ({"name": k, "count": v} for k, v in tag_counts.items()),
         key=lambda item: (-item["count"], item["name"]),
     )
+    # pagination for read list
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except Exception:
+        page = 1
+    try:
+        per_page = int(request.args.get("per_page", 10))
+    except Exception:
+        per_page = 10
+    per_page = max(1, min(per_page, 100))
+    total_items = len(read_entries_meta)
+    total_pages = max(1, math.ceil(total_items / per_page))
+    if page > total_pages:
+        page = total_pages
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_entries = read_entries_meta[start:end]
+
+    # render only the current page
+    entries = _render_page_entries(page_entries)
     return render_template_string(
         INDEX_TEMPLATE,
-        entries=read_entries,
+        entries=entries,
         uid=uid,
         unread_count=None,
         read_total=None,
@@ -403,6 +498,10 @@ def read_papers():
         tag_cloud=tag_cloud,
         active_tag=active_tag,
         tag_query=tag_query,
+        page=page,
+        per_page=per_page,
+        total_pages=total_pages,
+        total_items=total_items,
     )
 
 @app.get("/assets/base.css")

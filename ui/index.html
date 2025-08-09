@@ -112,6 +112,31 @@
     {% else %}
     <p>没有未读论文摘要。</p>
     {% endfor %}
+    
+    {% if total_pages and total_pages > 1 %}
+    <nav class="pagination" aria-label="分页导航">
+      {% set base_endpoint = 'read_papers' if show_read else 'index' %}
+      {% set qs = [] %}
+      {% if active_tag %}{% set _ = qs.append('tag=' ~ active_tag) %}{% endif %}
+      {% if tag_query %}{% set _ = qs.append('q=' ~ tag_query) %}{% endif %}
+      {% if active_tops %}
+        {% for t in active_tops %}{% set _ = qs.append('top=' ~ t) %}{% endfor %}
+      {% endif %}
+      {% set _ = qs.append('per_page=' ~ per_page) %}
+      {% set common = '&'.join(qs) %}
+      {% if common %}{% set common = common ~ '&' %}{% endif %}
+
+      <a class="page-btn {% if page <= 1 %}disabled{% endif %}"
+         href="{{ url_for(base_endpoint) }}?{{ common }}page={{ 1 }}">« 首页</a>
+      <a class="page-btn {% if page <= 1 %}disabled{% endif %}"
+         href="{{ url_for(base_endpoint) }}?{{ common }}page={{ page - 1 if page > 1 else 1 }}">‹ 上一页</a>
+      <span class="page-info">第 <strong>{{ page }}</strong> / {{ total_pages }} 页（共 {{ total_items }} 篇）</span>
+      <a class="page-btn {% if page >= total_pages %}disabled{% endif %}"
+         href="{{ url_for(base_endpoint) }}?{{ common }}page={{ page + 1 if page < total_pages else total_pages }}">下一页 ›</a>
+      <a class="page-btn {% if page >= total_pages %}disabled{% endif %}"
+         href="{{ url_for(base_endpoint) }}?{{ common }}page={{ total_pages }}">末页 »</a>
+    </nav>
+    {% endif %}
   </main>
   <script>
       // --- theme: init & toggle ---
@@ -357,6 +382,10 @@
     .top-chip { display:inline-flex; align-items:center; gap:.35rem; padding:.14rem .6rem; border-radius:999px; font-size:.8rem; background: linear-gradient(180deg, rgba(96,165,250,.15), rgba(96,165,250,.05)); color: var(--action-text); border: 1px solid var(--btn-border); }
     .top-chip input { margin:0; }
     .top-chip.pill { text-decoration:none; background: linear-gradient(180deg, rgba(96,165,250,.15), rgba(96,165,250,.05)); }
+    .pagination { display:flex; align-items:center; justify-content:center; gap:.5rem; margin:1rem 0; }
+    .page-btn { padding:.35rem .6rem; border:1px solid var(--btn-border); border-radius:6px; background: var(--card-bg); color: var(--text); text-decoration:none; }
+    .page-btn.disabled { pointer-events:none; opacity:.5; }
+    .page-info { margin: 0 .5rem; }
   </style>
 </body>
 
