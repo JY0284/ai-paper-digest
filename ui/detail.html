@@ -19,6 +19,16 @@
         </div>
     </header>
     <main>
+        {% if tags and tags|length %}
+        <form class="tag-row" method="GET" action="{{ url_for('index') }}" style="margin: .2rem 0 1rem; align-items:center; gap:.35rem;">
+          {% for tg in tags %}
+            <a class="tag-chip" href='{{ url_for("index") }}?tag={{ tg }}'>{{ tg }}</a>
+          {% endfor %}
+          <span class="muted" style="margin:0 .25rem 0 .5rem;">或 搜索:</span>
+          <input type="text" name="q" placeholder="模糊搜索标签" class="tag-input" />
+          <button type="submit" class="topbar-btn">筛选</button>
+        </form>
+        {% endif %}
         <article class='markdown-body'>
             {{ content | safe }}
         </article>
@@ -59,6 +69,16 @@
         navigator.sendBeacon('/event', JSON.stringify(payload));
       });
     </script>
+    <style>
+      .tag-row { display: flex; flex-wrap: wrap; gap: .35rem; }
+      .tag-chip {
+        display: inline-flex; align-items: center; gap: .35rem;
+        padding: .14rem .5rem; border-radius: 999px; font-size: .8rem;
+        background: var(--action-bg); color: var(--action-text); text-decoration: none;
+        border: 1px solid var(--btn-border);
+      }
+      .tag-input { padding: .25rem .5rem; border-radius: 6px; border: 1px solid var(--btn-border); background: var(--bg); color: var(--text); }
+    </style>
 </body>
 
 </html>

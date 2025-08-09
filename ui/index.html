@@ -16,7 +16,7 @@
     <h1 style="margin:0;"><a href='{{ url_for("index") }}'>📚 arXiv最新AI论文速览速学</a></h1>
     <div class="topbar-group">
       {% if uid %}
-        <a href="{{ url_for('read_papers') }}" class="topbar-btn">📖 查看已读论文</a>
+        <a href="{{ url_for('read_papers') }}" class="topbar-btn">📖 已读论文</a>
         <button id='logout-btn' class="topbar-btn">退出登录</button>
         <span class="topbar-divider"></span>
         <span class="user-chip">👤 <strong>{{ uid }}</strong></span>
@@ -31,6 +31,38 @@
     </div>
   </header>
   <main>   
+    <form id="tag-filter" method="GET" action="{{ url_for('index') }}" class="filters-panel">
+      <div class="filter-row head">
+        <span class="muted">标签筛选:</span>
+        <a href="{{ url_for('index') }}" class="tag-chip {% if not active_tag and not tag_query and (not active_tops or active_tops|length == 0) %}active{% endif %}">全部</a>
+        <a href="{{ url_for('index') }}" class="topbar-btn ghost-btn">清除筛选</a>
+        <span class="spacer"></span>
+        <span class="muted">或 搜索:</span>
+        <input type="text" name="q" placeholder="模糊搜索标签" value="{{ tag_query or '' }}" class="tag-input" />
+        <button type="submit" class="topbar-btn">筛选</button>
+      </div>
+
+      {% if top_cloud and top_cloud|length %}
+      <div class="filter-row tops">
+        <span class="muted row-title">顶级:</span>
+        <div class="top-chips">
+          {% for t in top_cloud %}
+            <label class="top-chip"><input type="checkbox" name="top" value="{{ t.name }}" {% if active_tops and (t.name in active_tops) %}checked{% endif %}><span>{{ t.name }}</span><span class="tag-count">{{ t.count }}</span></label>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <div class="filter-row details">
+        <span class="muted row-title">细分:</span>
+        <div class="detail-chips" id="detail-chips" data-query="{{ tag_query or '' }}">
+          {% for t in tag_cloud %}
+            <a href="{{ url_for('index') }}?tag={{ t.name }}" class="tag-chip {% if active_tag == t.name %}active{% endif %} {% if tag_query and (tag_query in t.name) %}query-hit{% endif %}">{{ t.name }} <span class="tag-count">{{ t.count }}</span></a>
+          {% endfor %}
+        </div>
+        <button type="button" id="toggle-detail-chips" class="topbar-btn ghost-btn" style="display:none;">展开全部标签</button>
+      </div>
+    </form>
     {% if show_read %}
     <div style="margin-bottom:0.7rem;text-align:center;">
       <span style="font-size:1.1rem;">📖 我的已读论文</span>
@@ -47,6 +79,24 @@
     {% for e in entries %}
     <article data-id='{{ e.id }}'>
       <h2><a href='{{ url_for("view_summary", arxiv_id=e.id) }}'>{{ e.id }}</a></h2>
+      {% if e.top_tags and e.top_tags|length %}
+      <div class="tag-row">
+        {% for tg in e.top_tags %}
+          <a class="top-chip pill" href='{{ url_for("index") }}?top={{ tg }}'>{{ tg }}</a>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if e.detail_tags and e.detail_tags|length %}
+      <div class="tag-row">
+        {% set q = tag_query or '' %}
+        {% for tg in e.detail_tags[:18] %}
+          <a class="tag-chip {% if q and (q in tg) %}query-hit{% endif %}" href='{{ url_for("index") }}?tag={{ tg }}'>{{ tg }}</a>
+        {% endfor %}
+        {% if e.detail_tags|length > 18 %}
+          <span class="muted">+{{ e.detail_tags|length - 18 }}</span>
+        {% endif %}
+      </div>
+      {% endif %}
       <div class='preview-html collapsed'>{{ e.preview_html | safe }}</div>
       <div class='card-actions'>
         <a class='toggle-link action-btn'>展开</a>
@@ -89,6 +139,39 @@
             apply(next);
           }
         });
+      })();
+      // auto-submit when toggling top-level checkboxes for instant filtering
+      document.addEventListener('DOMContentLoaded', () => {
+        const form = document.getElementById('tag-filter');
+        if (form) {
+          form.addEventListener('change', (ev) => {
+            const t = ev.target;
+            if (t && t.name === 'top') {
+              form.submit();
+            }
+          });
+        }
+      });
+
+      // collapse/expand detailed tags in filter
+      (function(){
+        const container = document.getElementById('detail-chips');
+        const toggleBtn = document.getElementById('toggle-detail-chips');
+        if (!container || !toggleBtn) return;
+        const chips = Array.from(container.querySelectorAll('.tag-chip'));
+        const LIMIT = 24;
+        if (chips.length > LIMIT) {
+          for (let i = LIMIT; i < chips.length; i++) chips[i].style.display = 'none';
+          toggleBtn.style.display = 'inline-block';
+          let expanded = false;
+          const updateLabel = () => toggleBtn.textContent = expanded ? '收起标签' : `展开全部标签（+${chips.length - LIMIT}）`;
+          updateLabel();
+          toggleBtn.addEventListener('click', () => {
+            expanded = !expanded;
+            for (let i = LIMIT; i < chips.length; i++) chips[i].style.display = expanded ? '' : 'none';
+            updateLabel();
+          });
+        }
       })();
 
       /* ===== tiny toast helper ===== */
@@ -248,6 +331,33 @@
 
     // only click events should be recorded per requirements
   </script>
+  <style>
+    .tag-row { display: flex; flex-wrap: wrap; gap: .5rem; margin: .25rem 0 .5rem; }
+    .tag-chip {
+      display: inline-flex; align-items: center; gap: .35rem;
+      padding: .14rem .5rem; border-radius: 999px; font-size: .8rem;
+      background: var(--action-bg); color: var(--action-text); text-decoration: none;
+      border: 1px solid var(--btn-border);
+    }
+    /* slightly larger chips inside article tag rows for better vertical breathing room */
+    .tag-row .tag-chip { padding: .2rem .6rem; }
+    .tag-chip .tag-count { opacity: .7; font-size: .75rem; }
+    .tag-chip.active { outline: 2px solid #60a5fa; outline-offset: 1px; }
+    .tag-chip.query-hit { background: #fef3c7; border-color: #f59e0b; box-shadow: 0 0 0 2px rgba(245,158,11,.15) inset; }
+    #tag-filter { background: var(--card-bg); box-shadow: var(--card-shadow); border-radius: .75rem; padding: .6rem .75rem; }
+    .filters-panel { display:flex; flex-direction: column; gap:.5rem; margin:0 0 1rem 0; }
+    .filter-row { display:flex; flex-wrap:wrap; align-items:center; gap:.45rem; }
+    .filter-row .row-title { width: 2.5rem; text-align:right; }
+    .filter-row.tops .top-chips { display:flex; flex-wrap:wrap; gap:.35rem; }
+    /* add proper grid-like spacing for detailed chips in filter */
+    .filter-row.details .detail-chips { display:flex; flex-wrap:wrap; gap:.2rem .25rem; }
+    .filters-panel .spacer { flex:1 1 auto; }
+    .ghost-btn { background: transparent; border:1px dashed var(--btn-border); }
+    .tag-input { padding: .25rem .5rem; border-radius: 6px; border: 1px solid var(--btn-border); background: var(--bg); color: var(--text); }
+    .top-chip { display:inline-flex; align-items:center; gap:.35rem; padding:.14rem .6rem; border-radius:999px; font-size:.8rem; background: linear-gradient(180deg, rgba(96,165,250,.15), rgba(96,165,250,.05)); color: var(--action-text); border: 1px solid var(--btn-border); }
+    .top-chip input { margin:0; }
+    .top-chip.pill { text-decoration:none; background: linear-gradient(180deg, rgba(96,165,250,.15), rgba(96,165,250,.05)); }
+  </style>
 </body>
 
 </html>

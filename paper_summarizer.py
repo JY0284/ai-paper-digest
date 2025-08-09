@@ -14,8 +14,10 @@ import logging
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
+import re
 
 import pymupdf4llm
 import requests
@@ -243,6 +245,107 @@ def progressive_summary(
     )
 
     return final.content, joined
+
+
+# ---------------------------------------------------------------------------
+# Tag generation from summary
+# ---------------------------------------------------------------------------
+
+
+def generate_tags_from_summary(
+    summary_text: str,
+    api_key: Optional[str] = None,
+    max_tags: int = 8,
+) -> dict:
+    """Generate AI-aware top-level and detailed tags using the LLM.
+
+    Reads prompt from prompts/tags.md. Returns a dict: {"top": [..], "tags": [..]}.
+    """
+    tmpl = PromptTemplate.from_file(
+        os.path.join("prompts", "tags.md"), encoding="utf-8"
+    ).format(summary_content=summary_text)
+
+    resp = llm_invoke([HumanMessage(content=tmpl)], api_key=api_key)
+    raw = (resp.content or "").strip()
+
+    # Strip fenced code blocks if present, e.g., ```json ... ``` or ``` ... ```
+    fenced_match = re.search(r"```(?:json|\w+)?\s*([\s\S]*?)\s*```", raw, re.IGNORECASE)
+    if fenced_match:
+        raw = fenced_match.group(1).strip()
+
+    # Try strict JSON parse first
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            tags = [str(t).strip() for t in data.get("tags", []) if str(t).strip()]
+            top = [str(t).strip() for t in data.get("top", []) if str(t).strip()]
+        elif isinstance(data, list):
+            # backward compatibility: array treated as detailed tags only
+            tags = [str(t).strip() for t in data if str(t).strip()]
+            top = []
+        else:
+            tags, top = [], []
+    except Exception:
+        # Try to locate a JSON object or array within the text
+        obj = re.search(r"\{[\s\S]*\}", raw)
+        if obj:
+            try:
+                data = json.loads(obj.group(0))
+                if isinstance(data, dict):
+                    tags = [str(t).strip() for t in data.get("tags", []) if str(t).strip()]
+                    top = [str(t).strip() for t in data.get("top", []) if str(t).strip()]
+                elif isinstance(data, list):
+                    tags = [str(t).strip() for t in data if str(t).strip()]
+                    top = []
+                else:
+                    tags, top = [], []
+            except Exception:
+                tags, top = [], []
+        else:
+            # Fallback: allow comma/line separated list for detailed tags only
+            if raw.startswith("-") or "\n" in raw:
+                parts = [p.strip(" -\t") for p in raw.splitlines()]
+            else:
+                parts = [p.strip() for p in raw.split(",")]
+            tags = [p for p in parts if p]
+            top = []
+
+    # Normalize and cap
+    normalized: List[str] = []
+    seen = set()
+    for t in tags:
+        norm = " ".join(t.split()).lower()
+        if norm and norm not in seen:
+            seen.add(norm)
+            normalized.append(norm)
+        if len(normalized) >= max_tags:
+            break
+
+    # Ensure a minimum of 3 tags if possible by splitting slashes etc.
+    if len(normalized) < 3:
+        extras: List[str] = []
+        for t in normalized:
+            for part in t.replace("/", " ").split():
+                if part and part not in seen:
+                    seen.add(part)
+                    extras.append(part)
+                if len(normalized) + len(extras) >= 3:
+                    break
+            if len(normalized) + len(extras) >= 3:
+                break
+        normalized.extend(extras)
+
+    # normalize top-level too and ensure subset of allowed set
+    allowed_top = {"llm","nlp","cv","ml","rl","agents","systems","theory","robotics","audio","multimodal"}
+    top_norm: List[str] = []
+    seen_top = set()
+    for t in top:
+        k = " ".join(str(t).split()).lower()
+        if k in allowed_top and k not in seen_top:
+            seen_top.add(k)
+            top_norm.append(k)
+
+    return {"top": top_norm, "tags": normalized}
 
 
 # ---------------------------------------------------------------------------

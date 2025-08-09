@@ -64,11 +64,39 @@ def get_entries():
         md_text = path.read_text(encoding="utf-8", errors="ignore")
         preview_html = render_markdown(md_text)
 
+        # try load tags saved alongside the summary
+        tags: list[str] = []
+        top_tags: list[str] = []
+        detail_tags: list[str] = []
+        tags_file = path.with_suffix("")
+        tags_file = tags_file.with_name(tags_file.name + ".tags.json")
+        try:
+            if tags_file.exists():
+                data = json.loads(tags_file.read_text(encoding="utf-8"))
+                # support legacy [..], flat {"top": [...], "tags": [...]},
+                # and nested {"tags": {"top": [...], "tags": [...]}}
+                if isinstance(data, list):
+                    detail_tags = [str(t).strip().lower() for t in data if str(t).strip()]
+                elif isinstance(data, dict):
+                    container = data
+                    if isinstance(data.get("tags"), dict):
+                        container = data.get("tags") or {}
+                    if isinstance(container.get("top"), list):
+                        top_tags = [str(t).strip().lower() for t in container.get("top") if str(t).strip()]
+                    if isinstance(container.get("tags"), list):
+                        detail_tags = [str(t).strip().lower() for t in container.get("tags") if str(t).strip()]
+                tags = (top_tags or []) + (detail_tags or [])
+        except Exception:
+            tags = []
+
         entries.append(
             {
                 "id": path.stem,
                 "updated": updated,
                 "preview_html": preview_html,
+                "tags": tags,
+                "top_tags": top_tags,
+                "detail_tags": detail_tags,
             }
         )
 
@@ -165,6 +193,11 @@ DETAIL_TEMPLATE = open(os.path.join('ui', 'detail.html'), 'r', encoding='utf-8')
 def index():
     uid = request.cookies.get("uid")
     entries = get_entries()
+    # tag filtering (from query string)
+    active_tag = (request.args.get("tag") or "").strip().lower() or None
+    tag_query = (request.args.get("q") or "").strip().lower()
+    # support multiple top filters: ?top=llm&top=cv
+    active_tops = [t.strip().lower() for t in request.args.getlist("top") if t.strip()]
     unread_count = None
     read_total = None
     read_today = None
@@ -186,7 +219,59 @@ def index():
                     read_today += 1
             except Exception:
                 continue
-    resp = make_response(render_template_string(INDEX_TEMPLATE, entries=entries, uid=uid, unread_count=unread_count, read_total=read_total, read_today=read_today))
+    # apply tag-based filters if present
+    if active_tag:
+        entries = [e for e in entries if active_tag in (e.get("detail_tags") or []) or active_tag in (e.get("top_tags") or [])]
+    if tag_query:
+        def matches_query(tags: list[str] | None, query: str) -> bool:
+            if not tags:
+                return False
+            for t in tags:
+                if query in t:
+                    return True
+            return False
+        entries = [e for e in entries if matches_query(e.get("detail_tags"), tag_query) or matches_query(e.get("top_tags"), tag_query)]
+    if active_tops:
+        entries = [e for e in entries if any(t in (e.get("top_tags") or []) for t in active_tops)]
+
+    # compute tag cloud from filtered entries only
+    tag_counts: dict[str, int] = {}
+    top_counts: dict[str, int] = {}
+    for e in entries:
+        for t in e.get("detail_tags", []) or []:
+            tag_counts[t] = tag_counts.get(t, 0) + 1
+        for t in e.get("top_tags", []) or []:
+            top_counts[t] = top_counts.get(t, 0) + 1
+
+    # sort tags by frequency then name
+    tag_cloud = sorted(
+        ({"name": k, "count": v} for k, v in tag_counts.items()),
+        key=lambda item: (-item["count"], item["name"]),
+    )
+    top_cloud = sorted(
+        ({"name": k, "count": v} for k, v in top_counts.items()),
+        key=lambda item: (-item["count"], item["name"]),
+    )
+
+    # when searching, show only related detailed tags in the filter bar
+    if tag_query:
+        tag_cloud = [t for t in tag_cloud if tag_query in t["name"]]
+
+    resp = make_response(
+        render_template_string(
+            INDEX_TEMPLATE,
+            entries=entries,
+            uid=uid,
+            unread_count=unread_count,
+            read_total=read_total,
+            read_today=read_today,
+            tag_cloud=tag_cloud,
+            active_tag=active_tag,
+            top_cloud=top_cloud,
+            active_tops=active_tops,
+            tag_query=tag_query,
+        )
+    )
     return resp
 
 
@@ -243,7 +328,29 @@ def view_summary(arxiv_id):
     md_text = md_path.read_text(encoding="utf-8", errors="ignore")
     uid = request.cookies.get("uid")
     html_content = render_markdown(md_text)
-    return render_template_string(DETAIL_TEMPLATE, content=html_content, arxiv_id=arxiv_id)
+    # load tags for this paper
+    tags: list[str] = []
+    tpath = md_path.with_suffix("")
+    tpath = tpath.with_name(tpath.name + ".tags.json")
+    try:
+        if tpath.exists():
+            data = json.loads(tpath.read_text(encoding="utf-8"))
+            # support flat and nested
+            if isinstance(data, list):
+                tags = [str(t).strip().lower() for t in data if str(t).strip()]
+            elif isinstance(data, dict):
+                container = data
+                if isinstance(data.get("tags"), dict):
+                    container = data.get("tags") or {}
+                raw = []
+                if isinstance(container.get("top"), list):
+                    raw.extend(container.get("top") or [])
+                if isinstance(container.get("tags"), list):
+                    raw.extend(container.get("tags") or [])
+                tags = [str(t).strip().lower() for t in raw if str(t).strip()]
+    except Exception:
+        tags = []
+    return render_template_string(DETAIL_TEMPLATE, content=html_content, arxiv_id=arxiv_id, tags=tags)
 
 
 @app.route("/raw/<arxiv_id>.md")
@@ -262,7 +369,41 @@ def read_papers():
     read_map = load_read_map(uid)
     entries = get_entries()
     read_entries = [e for e in entries if e["id"] in set(read_map.keys())]
-    return render_template_string(INDEX_TEMPLATE, entries=read_entries, uid=uid, unread_count=None, read_total=None, read_today=None, show_read=True)
+    # allow optional tag filter on read list
+    active_tag = (request.args.get("tag") or "").strip().lower() or None
+    tag_query = (request.args.get("q") or "").strip().lower()
+    if active_tag:
+        read_entries = [e for e in read_entries if active_tag in (e.get("tags") or [])]
+    if tag_query:
+        def matches_query(tags: list[str] | None, query: str) -> bool:
+            if not tags:
+                return False
+            for t in tags:
+                if query in t:
+                    return True
+            return False
+        read_entries = [e for e in read_entries if matches_query(e.get("tags"), tag_query)]
+    # tag cloud for read entries
+    tag_counts: dict[str, int] = {}
+    for e in read_entries:
+        for t in e.get("tags", []) or []:
+            tag_counts[t] = tag_counts.get(t, 0) + 1
+    tag_cloud = sorted(
+        ({"name": k, "count": v} for k, v in tag_counts.items()),
+        key=lambda item: (-item["count"], item["name"]),
+    )
+    return render_template_string(
+        INDEX_TEMPLATE,
+        entries=read_entries,
+        uid=uid,
+        unread_count=None,
+        read_total=None,
+        read_today=None,
+        show_read=True,
+        tag_cloud=tag_cloud,
+        active_tag=active_tag,
+        tag_query=tag_query,
+    )
 
 @app.get("/assets/base.css")
 def base_css():

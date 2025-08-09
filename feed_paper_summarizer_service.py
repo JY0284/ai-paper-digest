@@ -27,6 +27,7 @@ import re
 from glob import glob
 
 from tqdm import tqdm
+import json
 import markdown
 from feedgen.feed import FeedGenerator
 import xml.etree.ElementTree as ET
@@ -87,6 +88,18 @@ def _summarize_url(
         summary_path = ps.SUMMARY_DIR / f_name  # type: ignore[attr-defined]
         if summary_path.exists():
             _LOG.warning(f"{summary_path} existed")
+            # Ensure tags exist even if summary already cached
+            try:
+                tags_path = ps.SUMMARY_DIR / (pdf_path.stem + ".tags.json")  # type: ignore[attr-defined]
+                if not tags_path.exists():
+                    _LOG.info("🏷️  Backfilling tags for %s…", pdf_path.stem)
+                    summary_text = summary_path.read_text(encoding="utf-8", errors="ignore")
+                    tag_raw = ps.generate_tags_from_summary(summary_text, api_key=api_key)  # type: ignore[attr-defined]
+                    tag_obj = tag_raw if isinstance(tag_raw, dict) else {"tags": list(tag_raw or []), "top": []}
+                    tags_path.write_text(json.dumps(tag_obj, ensure_ascii=False, indent=2), encoding="utf-8")
+                    _LOG.info("✅  Backfilled %d tag(s) for %s", len(tag_obj.get("tags", [])), pdf_path.stem)
+            except Exception as exc:
+                _LOG.exception("Failed to backfill tags for %s: %s", pdf_path.stem, exc)
             return summary_path, pdf_url, paper_subject
         chunks_summary_out_path = ps.CHUNKS_SUMMARY_DIR / f_name
         logging.info(f"Start summarizing {md_path}...")
@@ -97,6 +110,17 @@ def _summarize_url(
         chunks_summary_out_path.write_text(chunks_summary, encoding="utf-8")
         summary_path.write_text(summary, encoding="utf-8")
 
+        # Generate and persist tags alongside the summary
+        try:
+            _LOG.info("🏷️  Generating tags for %s…", pdf_path.stem)
+            tag_raw = ps.generate_tags_from_summary(summary, api_key=api_key)  # type: ignore[attr-defined]
+            tag_obj = tag_raw if isinstance(tag_raw, dict) else {"tags": list(tag_raw or []), "top": []}
+            tags_path = ps.SUMMARY_DIR / (pdf_path.stem + ".tags.json")  # type: ignore[attr-defined]
+            tags_path.write_text(json.dumps(tag_obj, ensure_ascii=False, indent=2), encoding="utf-8")
+            _LOG.info("✅  Saved %d tag(s) for %s", len(tag_obj.get("tags", [])), pdf_path.stem)
+        except Exception as exc:
+            _LOG.exception("Failed to generate tags for %s: %s", pdf_path.stem, exc)
+
         _LOG.info("✅  Done – summary saved to %s", summary_path)
         return summary_path, pdf_url, paper_subject
 
@@ -104,6 +128,87 @@ def _summarize_url(
         _LOG.error("❌  %s – %s", url, exc)
         # _LOG.exception(exc)
         return None, None, None
+
+# ---------------------------------------------------------------------------
+# Local discovery helpers
+# ---------------------------------------------------------------------------
+
+def _collect_local_links() -> List[str]:
+    """Discover local papers and return a list of direct PDF URLs.
+
+    Preference order: markdown files (stems) → papers PDFs (stems). For each
+    stem we construct a direct arXiv PDF URL, which will hit the local cache in
+    download step when available.
+    """
+    links: List[str] = []
+    try:
+        # Prefer markdown directory if present
+        md_dir: Path = ps.MD_DIR  # type: ignore[attr-defined]
+        md_files = sorted(md_dir.glob("*.md")) if md_dir.exists() else []
+        if md_files:
+            for p in md_files:
+                links.append(f"https://arxiv.org/pdf/{p.stem}.pdf")
+            return links
+    except Exception:
+        pass
+
+    try:
+        pdf_dir: Path = ps.PDF_DIR  # type: ignore[attr-defined]
+        pdf_files = sorted(pdf_dir.glob("*.pdf")) if pdf_dir.exists() else []
+        for p in pdf_files:
+            links.append(f"https://arxiv.org/pdf/{p.stem}.pdf")
+    except Exception:
+        pass
+
+    return links
+
+
+# ---------------------------------------------------------------------------
+# Tags-only helper
+# ---------------------------------------------------------------------------
+
+def _tags_only_run() -> tuple[int, int]:
+    """Generate tags for existing summaries only.
+
+    Returns a tuple of (total_summaries, updated_count). Only summaries missing
+    tags will be processed.
+    """
+    try:
+        summary_dir: Path = ps.SUMMARY_DIR  # type: ignore[attr-defined]
+    except Exception:
+        _LOG.warning("Summary directory not available.")
+        return 0, 0
+
+    if not summary_dir.exists():
+        _LOG.warning("Summary directory %s does not exist.", summary_dir)
+        return 0, 0
+
+    md_files = sorted(summary_dir.glob("*.md"))
+    total = len(md_files)
+    if total == 0:
+        _LOG.info("No summaries found under %s", summary_dir)
+        return 0, 0
+
+    _LOG.info("🏷️  Tags-only mode – scanning %d summary file(s)…", total)
+    updated = 0
+    for md_path in md_files:
+        try:
+            tags_path = md_path.with_suffix("")
+            tags_path = tags_path.with_name(tags_path.name + ".tags.json")
+            if tags_path.exists():
+                continue
+            paper_id = md_path.stem
+            _LOG.info("🏷️  Generating tags for %s…", paper_id)
+            summary_text = md_path.read_text(encoding="utf-8", errors="ignore")
+            tags = ps.generate_tags_from_summary(summary_text)  # type: ignore[attr-defined]
+            tags_path.write_text(json.dumps({"tags": tags}, ensure_ascii=False, indent=2), encoding="utf-8")
+            _LOG.info("✅  Saved %d tag(s) for %s", len(tags), paper_id)
+            updated += 1
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOG.exception("Failed to generate tags for %s: %s", md_path.name, exc)
+
+    _LOG.info("🏷️  Tags-only complete – %d/%d updated", updated, total)
+    return total, updated
 
 # ---------------------------------------------------------------------------
 # Aggregate summaries → single Markdown file
@@ -132,13 +237,15 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:  # noqa: D
     p = argparse.ArgumentParser(
         description="Fetch an RSS feed, summarize each linked paper in parallel, and aggregate the results.",
     )
-    p.add_argument("rss_url", help="RSS feed URL (HuggingFace papers feed, ArXiv RSS, etc.)")
+    p.add_argument("rss_url", nargs="?", default="", help="RSS feed URL (HuggingFace papers feed, ArXiv RSS, etc.)")
     p.add_argument("--api-key", dest="api_key", help="DeepSeek API key")
     p.add_argument("--proxy", help="Proxy URL to use for PDF downloads (if needed)")
     p.add_argument("--workers", type=int, default=os.cpu_count() or 4, help="Concurrent workers (default: CPU count)")
     p.add_argument("--output", type=Path, default=Path("output.md"), help="Aggregate markdown output file")
     p.add_argument("--output_rss_path", type=Path, default=Path("hugging-face-ai-papers-rss.xml"), help="RSS xml file output path.")
     p.add_argument("--rebuild", action="store_true", help="Whether to rebuild the rss xml file using all existing summaries.")
+    p.add_argument("--local", action="store_true", help="Process local cached papers instead of fetching RSS.")
+    p.add_argument("--tags-only", action="store_true", help="Only generate tags for existing summaries and exit.")
     p.add_argument("--debug", action="store_true", help="Verbose logging")
     p.add_argument("--input-char-limit", dest="max_input_char", default=100000, help="Max allowed number of input chars")
     return p.parse_args(argv)
@@ -161,21 +268,36 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
         ps.SESSION = ps.build_session(args.proxy)  # type: ignore[attr-defined]
         _LOG.debug("Using proxy %s", args.proxy)
 
-    # ------------------------------------------------------------------
-    # 1. Collect links from RSS
-    # ------------------------------------------------------------------
-    _LOG.info("🔗  Fetching RSS feed…")
-    try:
-        links = get_links_from_rss(args.rss_url, timeout=20.0)
-    except Exception as exc:  # pylint: disable=broad-except
-        _LOG.error("Failed to fetch RSS: %s", exc)
-        sys.exit(1)
+    # Short-circuit: tags-only generation
+    if args.tags_only:
+        _tags_only_run()
+        _LOG.info("✨  All done (tags-only).")
+        return
 
-    links = list(dict.fromkeys(links))  # deduplicate while preserving order
-    if not links:
-        _LOG.warning("No links found – nothing to do.")
-        sys.exit(0)
-    _LOG.info("Found %d unique paper link(s)", len(links))
+    # ------------------------------------------------------------------
+    # 1. Collect links
+    # ------------------------------------------------------------------
+    if args.local:
+        _LOG.info("📦  Local mode enabled – discovering cached papers…")
+        links = _collect_local_links()
+        links = list(dict.fromkeys(links))
+        if not links:
+            _LOG.warning("No local papers discovered – nothing to do.")
+            sys.exit(0)
+        _LOG.info("Found %d local paper(s)", len(links))
+    else:
+        _LOG.info("🔗  Fetching RSS feed…")
+        try:
+            links = get_links_from_rss(args.rss_url, timeout=20.0)
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOG.error("Failed to fetch RSS: %s", exc)
+            sys.exit(1)
+
+        links = list(dict.fromkeys(links))  # deduplicate while preserving order
+        if not links:
+            _LOG.warning("No links found – nothing to do.")
+            sys.exit(0)
+        _LOG.info("Found %d unique paper link(s)", len(links))
 
     # ------------------------------------------------------------------
     # 2. Parallel summarization

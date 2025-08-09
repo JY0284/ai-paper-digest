@@ -126,3 +126,41 @@ def test_event_ingest_allows_only_click_types(tmp_path, monkeypatch):
     assert "foo" not in ev_types
 
 
+def test_index_renders_tags_and_filters(tmp_path, monkeypatch):
+    import summary_page as sp
+
+    setup_app_dirs(sp, tmp_path)
+    sp.app.config.update(TESTING=True)
+    client = sp.app.test_client()
+
+    # create two summaries with tags
+    s1 = sp.SUMMARY_DIR / "2506.11111.md"
+    s1.write_text("# s1\ncontent", encoding="utf-8")
+    (sp.SUMMARY_DIR / "2506.11111.tags.json").write_text('{"tags":["llm","agents"]}', encoding="utf-8")
+
+    s2 = sp.SUMMARY_DIR / "2506.22222.md"
+    s2.write_text("# s2\ncontent", encoding="utf-8")
+    (sp.SUMMARY_DIR / "2506.22222.tags.json").write_text('{"tags":["vision","agents"]}', encoding="utf-8")
+
+    # index should show tag chips and tag cloud
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.data.decode("utf-8")
+    assert "llm" in html and "agents" in html and "vision" in html
+
+    # filter by tag
+    res2 = client.get("/?tag=agents")
+    html2 = res2.data.decode("utf-8")
+    assert "2506.11111" in html2 and "2506.22222" in html2
+
+    res3 = client.get("/?tag=llm")
+    html3 = res3.data.decode("utf-8")
+    assert "2506.11111" in html3 and "2506.22222" not in html3
+
+    # detail page should render tag chips
+    res4 = client.get("/summary/2506.11111")
+    assert res4.status_code == 200
+    html4 = res4.data.decode("utf-8")
+    assert "llm" in html4 and "agents" in html4
+
+
