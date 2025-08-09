@@ -49,6 +49,60 @@ __version__ = "0.2.0"
 _LOG = logging.getLogger("feed_service")
 
 # ---------------------------------------------------------------------------
+# Logging helpers
+# ---------------------------------------------------------------------------
+
+
+def _setup_logging(debug: bool) -> None:
+    """Configure logging for the service and silence chatty libraries."""
+    logging.basicConfig(
+        level=logging.DEBUG if debug else logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s",
+        force=True,
+    )
+
+    _LOG.setLevel(logging.DEBUG if debug else logging.INFO)
+
+    if not debug:
+        class _MuteHttpXFilter(logging.Filter):
+            def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+                name = record.name or ""
+                if name.startswith("httpx") or name.startswith("httpcore"):
+                    return False
+                msg = record.getMessage()
+                if isinstance(msg, str) and (
+                    msg.startswith("HTTP Request:") or msg.startswith("HTTP Response:")
+                ):
+                    return False
+                return True
+
+        for handler in logging.getLogger().handlers:
+            handler.addFilter(_MuteHttpXFilter())
+
+        noisy_loggers = [
+            "httpx",
+            "httpcore",
+            "urllib3",
+            "openai",
+            "langchain",
+            "langchain_core",
+            "langchain_community",
+            "langchain_deepseek",
+            "tenacity",
+            "asyncio",
+        ]
+        for name in noisy_loggers:
+            logger = logging.getLogger(name)
+            # Be strict with network stacks
+            if name in ("httpx", "httpcore"):
+                logger.setLevel(logging.CRITICAL)
+                logger.disabled = True
+            else:
+                logger.setLevel(logging.WARNING)
+            logger.handlers.clear()
+            logger.addHandler(logging.NullHandler())
+            logger.propagate = False
+
 # Helper – wrap the paper_summarizer pipeline for a single URL
 # ---------------------------------------------------------------------------
 
@@ -256,10 +310,7 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:  # noqa: D
 
 def main(argv: List[str] | None = None) -> None:  # noqa: D401
     args = _parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s",
-    )
+    _setup_logging(args.debug)
 
     _LOG.info("🚀  feed_paper_summarizer_service %s", __version__)
 
