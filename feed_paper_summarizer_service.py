@@ -422,30 +422,80 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
 
     # Step 3: Process and add new items to the RSS feed
     new_items = []
-    for path, paper_url, paper_subject in successes:
-        paper_summary_markdown_content = path.read_text(encoding="utf-8")
-        paper_summary_html = markdown.markdown(paper_summary_markdown_content)
+    for path, paper_url, *rest in successes:
+        # Handle inconsistent data structure - some items might be missing paper_subject
+        paper_subject = rest[0] if rest else "Unknown Title"
+        
+        # Validate that the summary file exists before trying to read it
+        if not path.exists():
+            _LOG.warning(f"Summary file {path} does not exist, skipping RSS entry")
+            continue
+        
+        try:
+            paper_summary_markdown_content = path.read_text(encoding="utf-8")
+            paper_summary_html = markdown.markdown(paper_summary_markdown_content)
 
-        # Check if this paper has already been added by checking the URL
-        if paper_url not in existing_entries:
-            # Add a new entry to the RSS feed
-            entry = fg.add_entry()
-            entry.title(f"{paper_subject}")  # Set a meaningful title for the entry
-            entry.link(href=paper_url)  # Link to the paper's URL
-            entry.description(paper_summary_html)  # HTML description of the paper
-            new_items.append(entry)
+            # Check if this paper has already been added by checking the URL
+            if paper_url not in existing_entries:
+                # Add a new entry to the RSS feed
+                entry = fg.add_entry()
+                entry.title(f"{paper_subject}")
+                entry.link(href=paper_url)
+                entry.description(paper_summary_html)
+                new_items.append(entry)
+            else:
+                _LOG.debug(f"Paper {paper_url} already exists in RSS feed, skipping")
+                
+        except Exception as e:
+            _LOG.error(f"Failed to process {path} for RSS: {e}")
+            continue
 
-    # Step 4: Combine new items with existing ones
-    all_entries = new_items + existing_entries  # Combine existing and new entries
-
+    # Step 4: Recreate existing entries from the preserved data
+    if not args.rebuild and existing_entries:
+        _LOG.info(f"Found {len(existing_entries)} existing RSS entries, recreating them...")
+        # Read the existing RSS file and recreate entries
+        tree = ET.parse(RSS_FILE_PATH)
+        root = tree.getroot()
+        
+        for item in root.findall(".//item"):
+            title_elem = item.find("title")
+            link_elem = item.find("link")
+            desc_elem = item.find("description")
+            
+            if title_elem is not None and link_elem is not None and desc_elem is not None:
+                entry = fg.add_entry()
+                entry.title(title_elem.text or "Unknown Title")
+                entry.link(href=link_elem.text or "")
+                entry.description(desc_elem.text or "")
+    
     # Step 5: Keep only the latest 30 items in the RSS feed
-    fg.entries = all_entries[:30]  # Keep only the latest 30 items
+    current_entries = fg.entry()
+    if len(current_entries) > 30:
+        # Note: FeedGenerator doesn't support direct truncation
+        # We'll need to create a new FeedGenerator with only the first 30 entries
+        _LOG.info(f"Truncating RSS feed to 30 items (was {len(current_entries)} items)")
+        
+        # Create a new FeedGenerator with truncated entries
+        fg_truncated = FeedGenerator()
+        fg_truncated.title('Research Paper Summaries')
+        fg_truncated.link(href='https://yourwebsite.com')
+        fg_truncated.description('Summaries of research papers')
+        
+        # Add only the first 30 entries
+        for entry in current_entries[:30]:
+            new_entry = fg_truncated.add_entry()
+            new_entry.title(entry.title())
+            new_entry.link(href=entry.link()[0]['href'])
+            new_entry.description(entry.description())
+        
+        fg = fg_truncated
 
     # Step 6: Write the updated feed back to the RSS file
     with open(RSS_FILE_PATH, 'w', encoding="utf-8") as rss_file:
         rss_file.write(fg.rss_str(pretty=True).decode('utf-8'))
 
-    _LOG.info(f"📢 RSS feed updated {len(new_items)}(new)/{len(fg.entries)}(total) items successfully.")
+    total_entries = len(fg.entry())
+    _LOG.info(f"📢 RSS feed updated: {len(new_items)} new items added, {total_entries} total items in feed")
 
     _LOG.info("✨  All done!")
 
