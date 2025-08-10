@@ -1,108 +1,202 @@
-# hugging-face-paper-reader-rss
+# 🤖 AI论文速览速学系统
 
-`hugging-face-paper-reader-rss` 是一个用于快速生成学术论文摘要的轻量级服务。它通过从指定的 RSS 提要中提取论文链接，利用 DeepSeek AI 技术下载并总结每篇论文。此项目旨在帮助用户快速获取学术论文的摘要，提升阅读效率。
+> **让AI论文阅读变得简单高效，几分钟内掌握前沿技术要点**
 
-## 主要功能
+`ai-paper-digest` 是一个专为AI研究者、工程师和学习者设计的智能论文摘要系统。它能够自动从RSS源获取最新AI论文，使用先进的AI模型（如DeepSeek等）生成高质量的中文摘要，并提供现代化的Web界面帮助用户快速浏览和学习。
 
-1. **从 RSS 提要获取论文链接**：从指定的 RSS 提要中提取论文链接，支持如 HuggingFace、ArXiv 等常见源。
-2. **生成论文摘要**：使用 DeepSeek API 对下载的 PDF 论文进行文本提取和摘要生成。
-3. **并行处理**：支持多线程并行处理，提升批量论文摘要生成的效率。
-4. **汇总摘要**：将所有生成的摘要合并为一个 Markdown 文件，方便用户查看。
-5. **更新 RSS 提要**：生成的论文摘要将被添加到指定的 RSS 提要中，支持保留最新的条目。
+## ✨ 核心特性
 
-## 项目结构
+### 🚀 智能论文处理
+- **自动RSS抓取**：支持HuggingFace、ArXiv等主流AI论文源
+- **AI驱动摘要**：使用先进的AI模型生成结构化的中文论文摘要
+- **智能标签系统**：自动提取论文主题标签，支持多级分类
+- **并行处理**：多线程并发处理，批量生成摘要效率高
+
+### 🌐 现代化Web界面
+- **响应式设计**：支持桌面和移动设备
+- **智能筛选**：基于标签和关键词的论文筛选
+- **阅读进度跟踪**：记录已读论文，统计阅读数据
+- **深色模式**：支持明暗主题切换
+- **实时搜索**：快速定位感兴趣的论文
+
+### 📚 结构化摘要内容
+- **一句话总结**：快速理解论文核心贡献
+- **创新点分析**：详细的技术创新点解析
+- **实验结果**：关键指标和实际应用价值
+- **术语表**：重要概念和缩写的解释
+
+## 🏗️ 系统架构
 
 ```plaintext
-.
-├── collect_hf_paper_links_from_rss.py        # 用于从 RSS 获取论文链接
-├── feed_paper_summarizer_service.py          # 服务主脚本，负责整体流程
-├── hugging-face-ai-papers-rss.xml            # 生成的 RSS 文件
-├── markdown                                  # 存放从 PDF 提取的 Markdown 格式论文
-├── output.md                                 # 汇总的论文摘要 Markdown 文件
-├── paper_summarizer.py                       # 论文摘要生成模块
-├── papers                                    # 存放下载的 PDF 论文
-├── prompts                                   # 存放摘要生成的模板
-├── summary                                   # 存放生成的论文摘要
-├── tests                                     # 存放测试代码
-├── README.md                                 # 项目的说明文档
-└── uv.lock                                   # 依赖锁文件
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   RSS源抓取     │───▶│  AI论文摘要      │───▶│  Web展示界面    │
+│                 │    │                  │    │                 │
+│ • HuggingFace  │    │ • PDF下载解析    │    │ • 论文列表      │
+│ • ArXiv        │    │ • 文本分块处理   │    │ • 标签筛选      │
+│ • 自定义源     │    │ • AI模型摘要     │    │ • 阅读进度      │
+└─────────────────┘    │ • 智能标签生成   │    │ • 响应式设计    │
+                       └──────────────────┘    └─────────────────┘
 ```
 
-## 安装与使用
+## 📁 项目结构
+
+```plaintext
+ai-paper-digest/
+├── collect_hf_paper_links_from_rss.py    # RSS源链接提取
+├── feed_paper_summarizer_service.py      # 服务编排和流程控制
+├── paper_summarizer.py                   # PDF下载、解析和AI摘要生成
+├── summary_page.py                       # Flask Web应用
+├── prompts/                              # AI摘要提示词模板
+├── summary/                              # 生成的论文摘要
+├── papers/                               # 下载的PDF论文
+├── markdown/                             # 提取的Markdown文本
+└── ui/                                   # Web界面模板和样式
+```
+
+## 🚀 快速开始
 
 ### 环境要求
-
-* Python 3.x
-* 必须安装项目依赖的 Python 包，如 `tqdm`、`markdown`、`feedgen` 等。
+- Python 3.8+
+- 现代浏览器（支持ES6+）
 
 ### 安装依赖
-
-在项目根目录下执行以下命令，安装所有依赖：
-
 ```bash
+# 使用uv包管理器（推荐）
 uv sync
 ```
 
-### 使用说明
+### 基础使用
 
-1. **从 RSS 提要获取论文并生成摘要**
-
-   使用以下命令启动服务，指定 RSS 提要链接，工作线程数，并设置输出文件路径：
-
-   ```bash
-   python feed_paper_summarizer_service.py <RSS_URL> --workers <num_workers> --output <output_file.md>
-   ```
-
-   例如，从 HuggingFace 获取论文摘要：
-
-   ```bash
-   python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed --workers 4 --output summaries.md
-   ```
-
-2. **可选参数**
-
-   * `--api-key`：DeepSeek API 密钥（可选）。
-   * `--proxy`：PDF 下载代理 URL（如有需要）。
-   * `--workers`：并行处理的工作线程数（默认使用 CPU 核心数）。
-   * `--output`：输出的汇总文件路径（默认为 `output.md`）。
-   * `--output_rss_path`：生成的 RSS 文件路径（默认为 `hugging-face-ai-papers-rss.xml`）。
-   * `--rebuild`：是否重新生成 RSS 文件，使用现有的摘要文件重建。
-   * `--debug`：开启调试模式，输出详细日志。
-
-3. **生成和更新 RSS 提要**
-
-   可以在生成摘要时同时更新或重建 RSS 提要，命令如下：
-
-   ```bash
-   python feed_paper_summarizer_service.py <RSS_URL> --output_rss_path <path_to_rss_file> --rebuild
-   ```
-
-## 工作原理
-
-1. **获取论文链接**：服务会从指定的 RSS 提要 URL 获取所有论文链接，并进行去重。
-2. **并行摘要生成**：为每个论文链接下载 PDF 文件，并通过 DeepSeek 提取文本并生成摘要。
-3. **汇总摘要**：将所有论文的摘要合并为一个 Markdown 文件，便于查看。
-4. **更新 RSS 提要**：将生成的摘要和论文链接更新到 RSS 提要文件中，最多保留最新的 30 条记录。
-
-## 示例
-
-假设你使用以下命令从 RSS 提要获取论文，并生成摘要文件和更新 RSS 提要：
-
+#### 1. 从RSS源获取论文摘要
 ```bash
-python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed --workers 4 --output summaries.md --output_rss_path hugging-face-ai-papers-rss.xml
+python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed \
+  --workers 4 \
+  --output summaries.md \
+  --api-key YOUR_AI_API_KEY
 ```
 
-该命令会：
+#### 2. 启动Web界面
+```bash
+python summary_page.py
+```
+访问 http://localhost:22581 即可使用Web界面
 
-1. 从 HuggingFace RSS 提要中获取论文链接。
-2. 使用 4 个工作线程并行处理论文。
-3. 将生成的摘要保存到 `summaries.md` 文件中。
-4. 更新或重建 `hugging-face-ai-papers-rss.xml` 文件，包含最新的摘要条目。
+#### 3. 重建RSS源
+```bash
+python feed_paper_summarizer_service.py --rebuild \
+  --output_rss_path hugging-face-ai-papers-rss.xml
+```
 
-## 贡献
+## 📖 使用指南
 
-欢迎贡献代码、报告问题或提出功能请求！请按照以下步骤参与：
+### 命令行参数
+- `--api-key`：AI模型API密钥（支持DeepSeek、OpenAI等）
+- `--workers`：并行处理线程数（默认：CPU核心数）
+- `--output`：汇总摘要输出文件
+- `--output_rss_path`：RSS文件输出路径
+- `--rebuild`：重建RSS文件
+- `--local`：处理本地缓存的论文
+- `--tags-only`：仅生成标签
+- `--debug`：开启调试模式
 
-1. Fork 本仓库。
-2. 提交您的代码变更。
-3. 创建 Pull Request。
+### Web界面功能
+
+#### 论文浏览
+- **首页**：显示最新论文摘要，支持标签筛选
+- **标签系统**：顶级分类（LLM、CV、NLP等）+ 细分标签
+- **搜索功能**：基于标签的模糊搜索
+- **分页浏览**：支持自定义每页显示数量
+
+#### 个人管理
+- **用户登录**：设置个人ID，跟踪阅读进度
+- **已读列表**：查看已读论文，支持标签筛选
+- **阅读统计**：显示总阅读量、今日阅读等数据
+- **进度重置**：清空阅读记录重新开始
+
+#### 论文详情
+- **完整摘要**：结构化的论文总结内容
+- **标签展示**：论文相关的主题标签
+- **原始Markdown**：获取摘要的原始格式
+
+## 🔧 技术实现
+
+### 核心模块
+- **`collect_hf_paper_links_from_rss.py`**：RSS源链接提取
+- **`paper_summarizer.py`**：PDF下载、解析和AI摘要生成
+- **`feed_paper_summarizer_service.py`**：服务编排和流程控制
+- **`summary_page.py`**：Flask Web应用
+
+### AI摘要流程
+1. **PDF下载**：从论文页面解析并下载PDF文件
+2. **文本提取**：使用PyMuPDF提取PDF文本内容
+3. **智能分块**：按5000字符长度分块，支持重叠
+4. **渐进摘要**：使用AI模型逐块生成摘要，最后整合
+5. **标签生成**：基于摘要内容生成多级标签
+
+### 缓存策略
+- **PDF缓存**：避免重复下载
+- **Markdown缓存**：保存提取的文本
+- **摘要缓存**：避免重复生成
+- **标签缓存**：快速标签查询
+
+## 🌟 应用场景
+
+### 个人学习
+- **快速了解**：几分钟内掌握论文要点
+- **知识积累**：系统化学习AI前沿技术
+- **研究方向**：发现感兴趣的研究领域
+
+### 团队协作
+- **技术分享**：生成易于理解的摘要
+- **项目调研**：快速评估相关技术方案
+- **知识管理**：建立团队技术知识库
+
+### 学术研究
+- **文献综述**：快速浏览大量相关论文
+- **研究方向**：了解领域最新进展
+- **论文写作**：参考相关工作的创新点
+
+## 📊 性能特点
+
+- **处理速度**：单篇论文摘要生成约2-5分钟
+- **并发能力**：支持多线程并行处理
+- **缓存效率**：避免重复计算，提升响应速度
+- **内存优化**：分块处理大文档，控制内存使用
+
+## 🤝 贡献指南
+
+我们欢迎所有形式的贡献！无论是代码改进、文档完善，还是功能建议，都欢迎参与。
+
+### 贡献方式
+1. **Fork项目**：创建你的项目副本
+2. **功能开发**：实现新功能或修复问题
+3. **测试验证**：确保代码质量和功能正确性
+4. **提交PR**：创建Pull Request
+
+### 开发环境
+```bash
+# 克隆项目
+git clone https://github.com/JY0284/ai-paper-digest.git
+cd ai-paper-digest
+
+# 安装开发依赖
+uv sync
+
+# 运行测试
+python -m pytest tests/
+```
+
+## 📄 许可证
+
+本项目采用MIT许可证，详见[LICENSE](LICENSE)文件。
+
+
+## 📞 联系我们
+
+- **GitHub Issues**：[报告问题](https://github.com/JY0284/ai-paper-digest/issues)
+
+---
+
+⭐ **如果这个项目对你有帮助，请给我们一个Star！** ⭐
+
+> **让AI论文阅读不再是负担，而是知识的享受！**
