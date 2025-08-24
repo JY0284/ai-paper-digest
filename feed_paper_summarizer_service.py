@@ -11,6 +11,12 @@ The service now keeps its own logging **very high‑level** and leaves the fine�
 grained details (PDF caching, chunking, LLM calls, etc.) to the original
 modules. This avoids redundant log spam while still giving batch‑level
 visibility.
+
+FEATURES:
+- Thread-safe logging to prevent log line mixing during concurrent operations
+- Extract-only mode to skip LLM processing and just extract PDF text
+- Tags-only mode to generate tags for existing summaries
+- Graceful error handling and recovery
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import logging
+import logging.handlers
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,6 +32,8 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 import re
 from glob import glob
+from queue import Queue
+from threading import Lock
 
 from tqdm import tqdm
 import json
@@ -48,20 +57,53 @@ except ModuleNotFoundError as _e:  # pragma: no cover
 __version__ = "0.2.0"
 _LOG = logging.getLogger("feed_service")
 
+# Global log listener for cleanup
+_log_listener = None
+
 # ---------------------------------------------------------------------------
 # Logging helpers
 # ---------------------------------------------------------------------------
 
 
 def _setup_logging(debug: bool) -> None:
-    """Configure logging for the service and silence chatty libraries."""
-    logging.basicConfig(
-        level=logging.DEBUG if debug else logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s",
-        force=True,
+    """Configure thread-safe logging for the service and silence chatty libraries.
+    
+    This uses a QueueHandler + QueueListener pattern to prevent log line mixing
+    when multiple threads log simultaneously. All worker threads write to a queue,
+    and the main thread processes the queue sequentially, ensuring clean output.
+    """
+    # Create a queue for thread-safe logging
+    log_queue = Queue()
+    
+    # Create a queue handler that workers will use
+    queue_handler = logging.handlers.QueueHandler(log_queue)
+    
+    # Create a console handler for the main thread
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s")
     )
-
+    
+    # Create a queue listener that runs in the main thread
+    queue_listener = logging.handlers.QueueListener(
+        log_queue, console_handler, respect_handler_level=True
+    )
+    
+    # Start the listener
+    queue_listener.start()
+    
+    # Configure the root logger to use the queue handler
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()  # Remove any existing handlers
+    root_logger.addHandler(queue_handler)
+    root_logger.setLevel(logging.DEBUG if debug else logging.INFO)
+    
+    # Configure our service logger
     _LOG.setLevel(logging.DEBUG if debug else logging.INFO)
+    
+    # Store the listener globally so we can stop it later
+    global _log_listener
+    _log_listener = queue_listener
 
     if not debug:
         class _MuteHttpXFilter(logging.Filter):
@@ -116,6 +158,7 @@ def _summarize_url(
     url: str,
     api_key: Optional[str] = None,
     max_input_char: int = 50000,
+    extract_only: bool = False,
 ) -> Tuple[Optional[Path], Optional[str], Optional[str]]:
     """Run the full summarization pipeline for *url*.
 
@@ -123,7 +166,10 @@ def _summarize_url(
     or *None* on failure. Only very high‑level logs are emitted here – fine‑grained steps are already
     logged inside ``paper_summarizer``.
     """
-    _LOG.info("📝  Summarizing %s", url)
+    if extract_only:
+        _LOG.info("📄  Extracting text from %s", url)
+    else:
+        _LOG.info("📝  Summarizing %s", url)
 
     try:
         pdf_url = ps.resolve_pdf_url(url)  # type: ignore[attr-defined]
@@ -132,6 +178,11 @@ def _summarize_url(
 
         text = md_path.read_text(encoding="utf-8")
         paper_subject = extract_first_header(text)
+
+        # If extract_only mode, return the markdown path directly
+        if extract_only:
+            _LOG.info("✅  Extracted text saved to %s ", md_path)
+            return md_path, pdf_url, paper_subject
         text = re.sub(r'\^\[\d+\](.*\n)+', '', text) # remove references
         if max_input_char > 0:
             text = text[:max_input_char]
@@ -289,7 +340,7 @@ def _aggregate_summaries(paths: List[Path], out_file: Path, feed_url: str) -> No
 
 def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:  # noqa: D401
     p = argparse.ArgumentParser(
-        description="Fetch an RSS feed, summarize each linked paper in parallel, and aggregate the results.",
+        description="Fetch an RSS feed, process papers (extract text, summarize with LLM, generate tags), and aggregate results. Use --extract-only to skip LLM processing.",
     )
     p.add_argument("rss_url", nargs="?", default="", help="RSS feed URL (HuggingFace papers feed, ArXiv RSS, etc.)")
     p.add_argument("--api-key", dest="api_key", help="DeepSeek API key")
@@ -300,6 +351,7 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:  # noqa: D
     p.add_argument("--rebuild", action="store_true", help="Whether to rebuild the rss xml file using all existing summaries.")
     p.add_argument("--local", action="store_true", help="Process local cached papers instead of fetching RSS.")
     p.add_argument("--tags-only", action="store_true", help="Only generate tags for existing summaries and exit.")
+    p.add_argument("--extract-only", action="store_true", help="Only extract PDF text to markdown (no LLM calls, no summaries, no tags, no RSS generation).")
     p.add_argument("--debug", action="store_true", help="Verbose logging")
     p.add_argument("--input-char-limit", dest="max_input_char", default=100000, help="Max allowed number of input chars")
     return p.parse_args(argv)
@@ -323,6 +375,10 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
     if args.tags_only:
         _tags_only_run()
         _LOG.info("✨  All done (tags-only).")
+        # Clean up the log listener
+        if _log_listener:
+            _log_listener.stop()
+            _log_listener = None
         return
 
     # ------------------------------------------------------------------
@@ -363,142 +419,198 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
                 link,
                 api_key=args.api_key,
                 max_input_char=args.max_input_char,
+                extract_only=args.extract_only,
             ): idx
             for idx, link in enumerate(links)
         }
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="Summaries:"):
-            produced[futures[fut]] = fut.result()
+        try:
+            desc = "Text Extraction:" if args.extract_only else "Summaries:"
+            for fut in tqdm(as_completed(futures), total=len(futures), desc=desc):
+                try:
+                    result = fut.result(timeout=30)  # 30 seconds timeout per task
+                    produced[futures[fut]] = result
+                except Exception as exc:
+                    idx = futures[fut]
+                    _LOG.error("Task failed for link %d (%s): %s", idx, links[idx] if idx < len(links) else "unknown", exc)
+                    produced[idx] = (None, None, None)  # Mark as failed
+        except KeyboardInterrupt:
+            _LOG.warning("🛑  Processing interrupted by user. Cancelling remaining tasks...")
+            # Cancel all pending futures
+            for future in futures:
+                if not future.done():
+                    future.cancel()
+            # Wait a bit for running tasks to finish
+            import time
+            time.sleep(2)
+            raise  # Re-raise to be caught by main handler
 
     successes = [p for p in produced if p[0]]
     success_summaries_paths = [s[0] for s in successes]
-    _LOG.info("✔️  %d/%d summaries generated successfully", len(successes), len(links))
+    if args.extract_only:
+        _LOG.info("✔️  %d/%d papers extracted to markdown successfully", len(successes), len(links))
+    else:
+        _LOG.info("✔️  %d/%d summaries generated successfully", len(successes), len(links))
     if not successes:
-        _LOG.error("No summaries produced – aborting.")
+        if args.extract_only:
+            _LOG.error("No papers extracted successfully – aborting.")
+        else:
+            _LOG.error("No summaries produced – aborting.")
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # 3. Aggregate → single file
+    # 3. Aggregate → single file (skip in extract_only mode)
     # ------------------------------------------------------------------
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    _aggregate_summaries(success_summaries_paths, args.output, args.rss_url)
+    if not args.extract_only:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        _aggregate_summaries(success_summaries_paths, args.output, args.rss_url)
 
     # ------------------------------------------------------------------
-    # 4. Generate rss xml file
+    # 4. Generate rss xml file (skip in extract_only mode)
     # ------------------------------------------------------------------
-    RSS_FILE_PATH = args.output_rss_path
-    # Step 1: Read existing RSS file if it exists
-    existing_entries = []
-    if not args.rebuild:
-        if os.path.exists(RSS_FILE_PATH):
+    if not args.extract_only:
+        RSS_FILE_PATH = args.output_rss_path
+        # Step 1: Read existing RSS file if it exists
+        existing_entries = []
+        if not args.rebuild:
+            if os.path.exists(RSS_FILE_PATH):
+                tree = ET.parse(RSS_FILE_PATH)
+                root = tree.getroot()
+
+                # Extract existing RSS entries (items)
+                for item in root.findall(".//item"):
+                    paper_url = item.find("link").text
+                    existing_entries.append(paper_url)
+
+        # Step 2: Initialize a FeedGenerator for the new RSS feed
+        fg = FeedGenerator()
+
+        # Set the feed details (if not already set)
+        fg.title('Research Paper Summaries')
+        fg.link(href='https://yourwebsite.com')  # Your site or feed URL
+        fg.description('Summaries of research papers')
+
+        if args.rebuild:
+            _LOG.info("Remove current rss file and rebuild using local summaries...")
+            if os.path.exists(args.output_rss_path):
+                os.remove(args.output_rss_path)
+            papers = glob("markdown/*.md")
+            for p in papers:
+                with open(p, 'r', encoding='utf-8') as f:
+                    text = f.read()
+                    paper_subject = extract_first_header(text)
+                    pdf_url = "https://arxiv.org/pdf/" + p.split(os.path.sep)[-1].replace('.md', ".pdf")
+                    summary_path = Path(p.replace('markdown/', 'summary/'))
+                    if summary_path.exists():
+                        successes.append((summary_path, pdf_url, paper_subject))
+
+        # Step 3: Process and add new items to the RSS feed
+        new_items = []
+        for path, paper_url, *rest in successes:
+            # Handle inconsistent data structure - some items might be missing paper_subject
+            paper_subject = rest[0] if rest else "Unknown Title"
+
+            # Validate that the summary file exists before trying to read it
+            if not path.exists():
+                _LOG.warning(f"Summary file {path} does not exist, skipping RSS entry")
+                continue
+
+            try:
+                paper_summary_markdown_content = path.read_text(encoding="utf-8")
+                paper_summary_html = markdown.markdown(paper_summary_markdown_content)
+
+                # Check if this paper has already been added by checking the URL
+                if paper_url not in existing_entries:
+                    # Add a new entry to the RSS feed
+                    entry = fg.add_entry()
+                    entry.title(f"{paper_subject}")
+                    entry.link(href=paper_url)
+                    entry.description(paper_summary_html)
+                    new_items.append(entry)
+                else:
+                    _LOG.debug(f"Paper {paper_url} already exists in RSS feed, skipping")
+            except Exception as e:
+                _LOG.error(f"Failed to process {path} for RSS: {e}")
+                continue
+
+        # Step 4: Recreate existing entries from the preserved data
+        if not args.rebuild and existing_entries:
+            _LOG.info(f"Found {len(existing_entries)} existing RSS entries, recreating them...")
+            # Read the existing RSS file and recreate entries
             tree = ET.parse(RSS_FILE_PATH)
             root = tree.getroot()
 
-            # Extract existing RSS entries (items)
             for item in root.findall(".//item"):
-                paper_url = item.find("link").text
-                existing_entries.append(paper_url)
+                title_elem = item.find("title")
+                link_elem = item.find("link")
+                desc_elem = item.find("description")
 
-    # Step 2: Initialize a FeedGenerator for the new RSS feed
-    fg = FeedGenerator()
+                if title_elem is not None and link_elem is not None and desc_elem is not None:
+                    entry = fg.add_entry()
+                    entry.title(title_elem.text or "Unknown Title")
+                    entry.link(href=link_elem.text or "")
+                    entry.description(desc_elem.text or "")
 
-    # Set the feed details (if not already set)
-    fg.title('Research Paper Summaries')
-    fg.link(href='https://yourwebsite.com')  # Your site or feed URL
-    fg.description('Summaries of research papers')
+        # Step 5: Keep only the latest 30 items in the RSS feed
+        current_entries = fg.entry()
+        if len(current_entries) > 30:
+            # Note: FeedGenerator doesn't support direct truncation
+            # We'll need to create a new FeedGenerator with only the first 30 entries
+            _LOG.info(f"Truncating RSS feed to 30 items (was {len(current_entries)} items)")
 
-    if args.rebuild:
-        _LOG.info("Remove current rss file and rebuild using local summaries...")
-        if os.path.exists(args.output_rss_path):
-            os.remove(args.output_rss_path)
-        papers = glob("markdown/*.md")
-        for p in papers:
-            with open(p, 'r', encoding='utf-8') as f:
-                text = f.read()
-                paper_subject = extract_first_header(text)
-                pdf_url = "https://arxiv.org/pdf/" + p.split(os.path.sep)[-1].replace('.md', ".pdf")
-                summary_path = Path(p.replace('markdown/', 'summary/'))
-                if summary_path.exists():
-                    successes.append((summary_path, pdf_url, paper_subject))
+            # Create a new FeedGenerator with truncated entries
+            fg_truncated = FeedGenerator()
+            fg_truncated.title('Research Paper Summaries')
+            fg_truncated.link(href='https://yourwebsite.com')
+            fg_truncated.description('Summaries of research papers')
 
-    # Step 3: Process and add new items to the RSS feed
-    new_items = []
-    for path, paper_url, *rest in successes:
-        # Handle inconsistent data structure - some items might be missing paper_subject
-        paper_subject = rest[0] if rest else "Unknown Title"
-        
-        # Validate that the summary file exists before trying to read it
-        if not path.exists():
-            _LOG.warning(f"Summary file {path} does not exist, skipping RSS entry")
-            continue
-        
-        try:
-            paper_summary_markdown_content = path.read_text(encoding="utf-8")
-            paper_summary_html = markdown.markdown(paper_summary_markdown_content)
+            # Add only the first 30 entries
+            for entry in current_entries[:30]:
+                new_entry = fg_truncated.add_entry()
+                new_entry.title(entry.title())
+                new_entry.link(href=entry.link()[0]['href'])
+                new_entry.description(entry.description())
 
-            # Check if this paper has already been added by checking the URL
-            if paper_url not in existing_entries:
-                # Add a new entry to the RSS feed
-                entry = fg.add_entry()
-                entry.title(f"{paper_subject}")
-                entry.link(href=paper_url)
-                entry.description(paper_summary_html)
-                new_items.append(entry)
-            else:
-                _LOG.debug(f"Paper {paper_url} already exists in RSS feed, skipping")
-                
-        except Exception as e:
-            _LOG.error(f"Failed to process {path} for RSS: {e}")
-            continue
+            fg = fg_truncated
 
-    # Step 4: Recreate existing entries from the preserved data
-    if not args.rebuild and existing_entries:
-        _LOG.info(f"Found {len(existing_entries)} existing RSS entries, recreating them...")
-        # Read the existing RSS file and recreate entries
-        tree = ET.parse(RSS_FILE_PATH)
-        root = tree.getroot()
-        
-        for item in root.findall(".//item"):
-            title_elem = item.find("title")
-            link_elem = item.find("link")
-            desc_elem = item.find("description")
-            
-            if title_elem is not None and link_elem is not None and desc_elem is not None:
-                entry = fg.add_entry()
-                entry.title(title_elem.text or "Unknown Title")
-                entry.link(href=link_elem.text or "")
-                entry.description(desc_elem.text or "")
-    
-    # Step 5: Keep only the latest 30 items in the RSS feed
-    current_entries = fg.entry()
-    if len(current_entries) > 30:
-        # Note: FeedGenerator doesn't support direct truncation
-        # We'll need to create a new FeedGenerator with only the first 30 entries
-        _LOG.info(f"Truncating RSS feed to 30 items (was {len(current_entries)} items)")
-        
-        # Create a new FeedGenerator with truncated entries
-        fg_truncated = FeedGenerator()
-        fg_truncated.title('Research Paper Summaries')
-        fg_truncated.link(href='https://yourwebsite.com')
-        fg_truncated.description('Summaries of research papers')
-        
-        # Add only the first 30 entries
-        for entry in current_entries[:30]:
-            new_entry = fg_truncated.add_entry()
-            new_entry.title(entry.title())
-            new_entry.link(href=entry.link()[0]['href'])
-            new_entry.description(entry.description())
-        
-        fg = fg_truncated
+        # Step 6: Write the updated feed back to the RSS file
+        with open(RSS_FILE_PATH, 'w', encoding="utf-8") as rss_file:
+            rss_file.write(fg.rss_str(pretty=True).decode('utf-8'))
 
-    # Step 6: Write the updated feed back to the RSS file
-    with open(RSS_FILE_PATH, 'w', encoding="utf-8") as rss_file:
-        rss_file.write(fg.rss_str(pretty=True).decode('utf-8'))
-
-    total_entries = len(fg.entry())
-    _LOG.info(f"📢 RSS feed updated: {len(new_items)} new items added, {total_entries} total items in feed")
+        total_entries = len(fg.entry())
+        _LOG.info(f"📢 RSS feed updated: {len(new_items)} new items added, {total_entries} total items in feed")
 
     _LOG.info("✨  All done!")
+    
+    # Clean up the log listener
+    if _log_listener:
+        _log_listener.stop()
+        _log_listener = None
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        _LOG.info("🛑  Process interrupted by user. Cleaning up...")
+        # Clean up the log listener
+        if _log_listener:
+            _log_listener.stop()
+            _log_listener = None
+        sys.exit(130)  # Standard exit code for SIGINT
+    except Exception as e:
+        _LOG.error("💥  Fatal error: %s", e)
+        # Clean up the log listener
+        if _log_listener:
+            _log_listener.stop()
+            _log_listener = None
+        sys.exit(1)
+
+# Example usage:
+# Regular mode with LLM processing:
+#   uv run python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed --workers 2
+#
+# Extract-only mode (no LLM, just text extraction):
+#   uv run python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed --extract-only --workers 4
+#
+# Tags-only mode (only generate tags for existing summaries):
+#   uv run python feed_paper_summarizer_service.py --tags-only

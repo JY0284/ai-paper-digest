@@ -20,6 +20,10 @@ from typing import Iterable, List, Optional, Tuple
 import re
 
 import pymupdf4llm
+try:
+    import pymupdf as fitz
+except ImportError:
+    fitz = None
 import requests
 from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
@@ -130,18 +134,82 @@ def download_pdf(
 # ---------------------------------------------------------------------------
 
 
-def extract_markdown(pdf_path: Path, md_dir: Path = MD_DIR) -> Path:
+def extract_markdown(pdf_path: Path, md_dir: Path = MD_DIR, max_retries: int = 3) -> Path:
     """Extract markdown text, caching if already done."""
     md_dir.mkdir(parents=True, exist_ok=True)
     md_path = md_dir / (pdf_path.stem + ".md")
 
     if md_path.exists():
         return md_path
-    try:
-        md_text = pymupdf4llm.to_markdown(str(pdf_path))
-    except Exception as e:
-        logging.error(f"PDF to Markdown failed. {pdf_path}")
-        raise e
+
+    # Try multiple PDF processing approaches with retries
+    md_text = None
+    all_errors = []
+
+    for attempt in range(max_retries):
+        if attempt > 0:
+            _LOG.info(f"Retry attempt {attempt + 1}/{max_retries} for {pdf_path}")
+            import time
+            time.sleep(1)  # Brief pause between retries
+
+        errors = []
+
+        # Method 1: Primary - pymupdf4llm
+        try:
+            md_text = pymupdf4llm.to_markdown(str(pdf_path))
+            if md_text and md_text.strip():
+                break  # Success!
+        except Exception as e:
+            error_msg = f"MuPDF error: {e}"
+            _LOG.error("Primary PDF processing failed for %s: %s", pdf_path, error_msg)
+            errors.append(error_msg)
+
+        # Method 2: Fallback - try with different MuPDF settings
+        if not md_text and fitz:
+            try:
+                doc = fitz.open(str(pdf_path))
+                md_text = ""
+                for page_num in range(len(doc)):
+                    page = doc.load_page(page_num)
+                    text = page.get_text()
+                    md_text += f"## Page {page_num + 1}\n\n{text}\n\n"
+                doc.close()
+                if md_text and md_text.strip():
+                    break  # Success!
+            except Exception as e:
+                error_msg = f"Fallback MuPDF error: {e}"
+                _LOG.error("Fallback PDF processing failed for %s: %s", pdf_path, error_msg)
+                errors.append(error_msg)
+
+        # Method 3: Last resort - try extracting raw text
+        if not md_text and fitz:
+            try:
+                doc = fitz.open(str(pdf_path))
+                md_text = ""
+                for page_num in range(len(doc)):
+                    page = doc.load_page(page_num)
+                    # Try different extraction methods
+                    try:
+                        text = page.get_text("text")
+                    except:
+                        text = page.get_text("html")
+                        # Basic HTML to text conversion
+                        text = re.sub(r'<[^>]+>', '', text)
+                    md_text += f"## Page {page_num + 1}\n\n{text}\n\n"
+                doc.close()
+                if md_text and md_text.strip():
+                    break  # Success!
+            except Exception as e:
+                error_msg = f"Raw text extraction error: {e}"
+                _LOG.error("Raw text extraction failed for %s: %s", pdf_path, error_msg)
+                errors.append(error_msg)
+
+        all_errors.extend(errors)
+
+    if not md_text or not md_text.strip():
+        error_summary = " | ".join(all_errors)
+        raise ValueError(f"All PDF processing methods failed for {pdf_path}. Errors: {error_summary}")
+
     md_path.write_text(md_text, encoding="utf-8")
     return md_path
 
