@@ -29,6 +29,7 @@ from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langchain_core.prompts import PromptTemplate
 from langchain_deepseek import ChatDeepSeek
+from langchain_ollama import OllamaLLM
 from tqdm import tqdm
 
 
@@ -41,6 +42,11 @@ CHUNK_LENGTH = 5000
 CHUNK_OVERLAP_RATIO = 0.05
 
 DEFAULT_PROXY_URL = "socks5://127.0.0.1:1081"
+
+# LLM Provider configuration
+DEFAULT_LLM_PROVIDER = "deepseek"  # "deepseek" or "ollama"
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+DEFAULT_OLLAMA_MODEL = "qwen3:8b"
 
 # Directories for caching
 BASE_DIR = Path(__file__).parent
@@ -249,19 +255,59 @@ def chunk_text(
 
 
 def llm_invoke(
-    messages: List[BaseMessage], api_key: Optional[str] = None, **kwargs
+    messages: List[BaseMessage], 
+    api_key: Optional[str] = None, 
+    provider: str = DEFAULT_LLM_PROVIDER,
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
+    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    **kwargs
 ) -> AIMessage:
-    if not api_key:
-        api_key = os.getenv("DEEPSEEK_API_KEY")
-    llm = ChatDeepSeek(
-        model=MODEL_NAME,
-        temperature=0,
-        max_tokens=None,
-        timeout=None,
-        max_retries=2,
-        api_key=api_key,
-    )
-    return llm.invoke(messages)
+    """Invoke LLM with support for both DeepSeek and Ollama providers."""
+    
+    if provider.lower() == "ollama":
+        # Use Ollama
+        if not ollama_base_url:
+            ollama_base_url = os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
+        if not ollama_model:
+            ollama_model = os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+            
+        _LOG.debug("Using Ollama provider: %s at %s", ollama_model, ollama_base_url)
+        
+        llm = OllamaLLM(
+            model=ollama_model,
+            base_url=ollama_base_url,
+            temperature=0,
+            timeout=120,  # Ollama can be slower
+        )
+        
+        # Convert messages to text for Ollama (simpler interface)
+        if len(messages) == 1:
+            prompt = messages[0].content
+        else:
+            # Handle conversation format
+            prompt = "\n\n".join([f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {m.content}" for m in messages])
+        
+        response = llm.invoke(prompt)
+        return AIMessage(content=response)
+        
+    else:
+        # Use DeepSeek (default)
+        if not api_key:
+            api_key = os.getenv("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise ValueError("DeepSeek API key required. Set DEEPSEEK_API_KEY environment variable or pass --api-key")
+            
+        _LOG.debug("Using DeepSeek provider: %s", MODEL_NAME)
+        
+        llm = ChatDeepSeek(
+            model=MODEL_NAME,
+            temperature=0,
+            max_tokens=None,
+            timeout=None,
+            max_retries=2,
+            api_key=api_key,
+        )
+        return llm.invoke(messages)
 
 
 def progressive_summary(
@@ -269,6 +315,9 @@ def progressive_summary(
     summary_path: Path,
     chunk_summary_path: Path,
     api_key: Optional[str] = None,
+    provider: str = DEFAULT_LLM_PROVIDER,
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
+    ollama_model: str = DEFAULT_OLLAMA_MODEL,
     max_workers: int = 4,
 ) -> Tuple[str, str]:
     if summary_path.exists():
@@ -285,7 +334,8 @@ def progressive_summary(
                 os.path.join("prompts", "chunk_summary.md"), encoding="utf-8"
             ).format(chunk_content=chunk)
         )
-        resp = llm_invoke([msg], api_key=api_key)
+        resp = llm_invoke([msg], api_key=api_key, provider=provider, 
+                         ollama_base_url=ollama_base_url, ollama_model=ollama_model)
         return idx, resp.content
 
     if not chunk_summary_path.exists():
@@ -313,6 +363,9 @@ def progressive_summary(
             HumanMessage(joined),
         ],
         api_key=api_key,
+        provider=provider,
+        ollama_base_url=ollama_base_url,
+        ollama_model=ollama_model,
     )
 
     return final.content, joined
@@ -326,6 +379,9 @@ def progressive_summary(
 def generate_tags_from_summary(
     summary_text: str,
     api_key: Optional[str] = None,
+    provider: str = DEFAULT_LLM_PROVIDER,
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
+    ollama_model: str = DEFAULT_OLLAMA_MODEL,
     max_tags: int = 8,
 ) -> dict:
     """Generate AI-aware top-level and detailed tags using the LLM.
@@ -336,7 +392,8 @@ def generate_tags_from_summary(
         os.path.join("prompts", "tags.md"), encoding="utf-8"
     ).format(summary_content=summary_text)
 
-    resp = llm_invoke([HumanMessage(content=tmpl)], api_key=api_key)
+    resp = llm_invoke([HumanMessage(content=tmpl)], api_key=api_key, provider=provider,
+                     ollama_base_url=ollama_base_url, ollama_model=ollama_model)
     raw = (resp.content or "").strip()
 
     # Strip fenced code blocks if present, e.g., ```json ... ``` or ``` ... ```
@@ -426,10 +483,16 @@ def generate_tags_from_summary(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Summarize an academic paper via DeepSeek-v3 LLM"
+        description="Summarize an academic paper via LLM (DeepSeek or Ollama)"
     )
     parser.add_argument("url", help="Paper URL (PDF or landing page)")
     parser.add_argument("--api-key", help="DeepSeek/OpenAI API key")
+    parser.add_argument("--provider", choices=["deepseek", "ollama"], default=DEFAULT_LLM_PROVIDER,
+                       help=f"LLM provider to use (default: {DEFAULT_LLM_PROVIDER})")
+    parser.add_argument("--ollama-base-url", default=DEFAULT_OLLAMA_BASE_URL,
+                       help=f"Ollama service base URL (default: {DEFAULT_OLLAMA_BASE_URL})")
+    parser.add_argument("--ollama-model", default=DEFAULT_OLLAMA_MODEL,
+                       help=f"Ollama model name (default: {DEFAULT_OLLAMA_MODEL})")
     parser.add_argument("--proxy", help="Proxy URL to use")
     parser.add_argument("--debug", action="store_true", help="Verbose logging")
     args = parser.parse_args()
@@ -460,7 +523,9 @@ def main() -> None:
 
         summary_path = SUMMARY_DIR / (pdf_path.stem + ".md")
         summary = progressive_summary(
-            chunks, summary_path=summary_path, api_key=args.api_key
+            chunks, summary_path=summary_path, api_key=args.api_key,
+            provider=args.provider, ollama_base_url=args.ollama_base_url, 
+            ollama_model=args.ollama_model
         )
         summary_path.write_text(summary.content, encoding="utf-8")
         print("\n" + "=" * 80 + "\nFINAL SUMMARY saved to:\n" + str(summary_path))
