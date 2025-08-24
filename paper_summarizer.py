@@ -62,12 +62,15 @@ _LOG = logging.getLogger("paper_summarizer")
 def build_session(proxy_url: Optional[str] = None) -> requests.Session:
     session = requests.Session()
     if proxy_url:
-        _LOG.debug("Using proxy: %s", proxy_url)
+        _LOG.warning("Using proxy: %s", proxy_url)
         session.proxies.update({"http": proxy_url, "https": proxy_url})
+    else:
+        _LOG.warning("No proxy configured, using direct connection")
     return session
 
 
-SESSION = build_session(os.getenv("PROXY_URL", DEFAULT_PROXY_URL))
+# Create session without proxy by default
+SESSION = build_session()
 
 
 # ---------------------------------------------------------------------------
