@@ -17,6 +17,9 @@
     <div class="topbar-group">
       {% if uid %}
         <a href="{{ url_for('read_papers') }}" class="topbar-btn">📖 已读论文</a>
+        {% if uid in admin_users %}
+        <button id='admin-fetch-btn' class="topbar-btn admin-btn" title="获取最新论文摘要">🔄 获取最新</button>
+        {% endif %}
         <button id='logout-btn' class="topbar-btn">退出登录</button>
         <span class="topbar-divider"></span>
         <span class="user-chip">👤 <strong>{{ uid }}</strong></span>
@@ -138,6 +141,51 @@
     </nav>
     {% endif %}
   </main>
+  
+  <!-- Admin Progress Modal -->
+  <div id="admin-progress-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>🔄 获取最新论文摘要</h3>
+        <button id="close-modal-btn" class="close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="progress-status">
+          <div class="status-line">
+            <span class="status-icon">⏳</span>
+            <span class="status-text">正在启动服务...</span>
+          </div>
+          <div class="command-display">
+            <span class="command-label">执行命令:</span>
+            <code class="command-text" id="command-text">uv run python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed</code>
+            <div class="command-details">
+              <span class="detail-item">工作目录: <code>./</code></span>
+              <span class="detail-item">超时时间: <code>5分钟</code></span>
+            </div>
+          </div>
+        </div>
+        
+        <div class="log-container">
+          <div class="log-header">
+            <span>实时日志</span>
+            <button id="clear-logs-btn" class="small-btn">清除日志</button>
+          </div>
+          <div id="log-output" class="log-output"></div>
+        </div>
+        
+        <div id="summary-stats" class="summary-stats" style="display: none;">
+          <div class="stats-header">
+            <span>📊 处理结果摘要</span>
+          </div>
+          <div id="stats-content" class="stats-content"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="cancel-fetch-btn" class="topbar-btn">取消</button>
+      </div>
+    </div>
+  </div>
+  
   <script>
       // --- theme: init & toggle ---
       (function() {
@@ -354,6 +402,219 @@
       }
     }, true);
 
+    // Admin fetch functionality
+    document.addEventListener('click', ev => {
+      if (ev.target.id === 'admin-fetch-btn') {
+        ev.preventDefault();
+        showAdminModal();
+      }
+    });
+
+    // Modal functionality
+    function showAdminModal() {
+      const modal = document.getElementById('admin-progress-modal');
+      const statusText = modal.querySelector('.status-text');
+      const statusIcon = modal.querySelector('.status-icon');
+      const logOutput = document.getElementById('log-output');
+      const summaryStats = document.getElementById('summary-stats');
+      const statsContent = document.getElementById('stats-content');
+      
+      // Reset modal state
+      modal.style.display = 'block';
+      statusText.textContent = '正在启动服务...';
+      statusIcon.textContent = '⏳';
+      logOutput.innerHTML = '';
+      summaryStats.style.display = 'none';
+      statsContent.innerHTML = '';
+      
+      // Add initial log entry
+      addLogEntry('开始获取最新论文摘要...', 'info');
+      
+      // Start the fetch process
+      startFetchProcess(statusText, statusIcon, logOutput, summaryStats, statsContent);
+    }
+
+    function startFetchProcess(statusText, statusIcon, logOutput, summaryStats, statsContent) {
+      // Start streaming connection using fetch
+      fetch('/admin/fetch_latest_stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      })
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        addLogEntry('🔗 已连接到服务器，开始获取最新摘要...', 'info');
+        
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = ''; // Buffer for incomplete lines
+        
+        function readStream() {
+          return reader.read().then(({ done, value }) => {
+            if (done) {
+              return;
+            }
+            
+            const chunk = decoder.decode(value, { stream: true });
+            buffer += chunk;
+            
+            // Split by newlines and process complete lines
+            const lines = buffer.split('\n');
+            // Keep the last line in buffer as it might be incomplete
+            buffer = lines.pop() || '';
+            
+            lines.forEach(line => {
+              if (line.startsWith('data: ')) {
+                try {
+                  // Validate the data format before parsing
+                  const jsonData = line.slice(6).trim();
+                  if (!jsonData || jsonData === '') {
+                    return; // Skip empty data lines
+                  }
+                  
+                  const data = JSON.parse(jsonData);
+                  
+                  // Validate required fields
+                  if (!data.type) {
+                    console.warn('Received data without type:', data);
+                    return;
+                  }
+                  
+                  switch (data.type) {
+                    case 'status':
+                      // Update status display
+                      statusText.textContent = data.message;
+                      statusIcon.textContent = data.icon;
+                      addLogEntry(data.message, 'info');
+                      break;
+                      
+                    case 'log':
+                      // Just display the raw output
+                      addLogEntry(data.message, 'info');
+                      break;
+                      
+                    case 'complete':
+                      // Process completion
+                      if (data.status === 'success') {
+                        statusText.textContent = '获取成功！';
+                        statusIcon.textContent = '✅';
+                        addLogEntry('✅ ' + data.message, 'success');
+                        
+                        // Show success message and auto-refresh
+                        setTimeout(() => {
+                          showToast('✅ 最新论文摘要获取成功！页面将在3秒后刷新...');
+                          setTimeout(() => {
+                            location.reload();
+                          }, 3000);
+                        }, 1000);
+                      } else {
+                        statusText.textContent = '获取失败';
+                        statusIcon.textContent = '❌';
+                        addLogEntry('❌ ' + data.message, 'error');
+                      }
+                      break;
+                      
+                    case 'error':
+                      // Handle errors
+                      addLogEntry('❌ ' + data.message, 'error');
+                      break;
+                  }
+                } catch (error) {
+                  console.error('Error parsing SSE data:', error);
+                  // Show more informative error message
+                  const errorMsg = error.message || '未知错误';
+                  addLogEntry(`❌ 解析数据时发生错误: ${errorMsg}`, 'error');
+                  
+                  // Log the raw data for debugging
+                  console.log('Raw data that failed to parse:', line);
+                  
+                  // Try to show the raw data if possible
+                  try {
+                    const rawData = line.slice(6);
+                    if (rawData && rawData.trim()) {
+                      addLogEntry(`📄 原始数据: ${rawData}`, 'info');
+                    }
+                  } catch (e) {
+                    // If even showing raw data fails, just log it
+                    console.log('Could not display raw data:', e);
+                  }
+                }
+              }
+            });
+            
+            // Continue reading
+            return readStream();
+          });
+        }
+        
+        return readStream();
+      })
+      .catch(error => {
+        console.error('Fetch error:', error);
+        addLogEntry('❌ 连接错误，请检查网络连接', 'error');
+        statusText.textContent = '连接失败';
+        statusIcon.textContent = '❌';
+      });
+    }
+
+    function addLogEntry(message, type = 'info') {
+      const logOutput = document.getElementById('log-output');
+      const timestamp = new Date().toLocaleTimeString();
+      const logLine = document.createElement('div');
+      logLine.className = `log-line log-${type}`;
+      logLine.innerHTML = `<span class="log-timestamp">[${timestamp}]</span>${message}`;
+      logOutput.appendChild(logLine);
+      logOutput.scrollTop = logOutput.scrollHeight;
+    }
+
+    function displaySummaryStats(stats, container) {
+      container.innerHTML = '';
+      
+      const statLabels = {
+        'papers_found': '发现的论文',
+        'success_count': '成功处理',
+        'rss_updated': 'RSS更新',
+        'completion': '完成状态'
+      };
+      
+      Object.entries(stats).forEach(([key, value]) => {
+        if (value) {
+          const statItem = document.createElement('div');
+          statItem.className = 'stat-item';
+          statItem.innerHTML = `
+            <span class="stat-label">${statLabels[key] || key}:</span>
+            <span class="stat-value">${value}</span>
+          `;
+          container.appendChild(statItem);
+        }
+      });
+    }
+
+    // Modal event handlers
+    document.addEventListener('click', ev => {
+      if (ev.target.id === 'close-modal-btn') {
+        document.getElementById('admin-progress-modal').style.display = 'none';
+      }
+      if (ev.target.id === 'cancel-fetch-btn') {
+        document.getElementById('admin-progress-modal').style.display = 'none';
+        showToast('已取消获取操作');
+      }
+      if (ev.target.id === 'clear-logs-btn') {
+        document.getElementById('log-output').innerHTML = '';
+      }
+    });
+
+    // Close modal when clicking outside
+    document.getElementById('admin-progress-modal').addEventListener('click', ev => {
+      if (ev.target.id === 'admin-progress-modal') {
+        ev.target.style.display = 'none';
+      }
+    });
+
     // only click events should be recorded per requirements
   </script>
   <style>
@@ -386,6 +647,278 @@
     .page-btn { padding:.35rem .6rem; border:1px solid var(--btn-border); border-radius:6px; background: var(--card-bg); color: var(--text); text-decoration:none; }
     .page-btn.disabled { pointer-events:none; opacity:.5; }
     .page-info { margin: 0 .5rem; }
+    
+    /* Admin button styling */
+    .admin-btn {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      font-weight: 500;
+      transition: all 0.2s ease;
+    }
+    .admin-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+    .admin-btn:active {
+      transform: translateY(0);
+    }
+    .admin-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+    
+    /* Modal styling */
+    .modal {
+      position: fixed;
+      z-index: 1000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(4px);
+    }
+    
+    .modal-content {
+      background-color: var(--card-bg);
+      margin: 5% auto;
+      padding: 0;
+      border-radius: 12px;
+      width: 90%;
+      max-width: 800px;
+      max-height: 80vh;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--btn-border);
+    }
+    
+    .modal-header {
+      padding: 1.5rem 1.5rem 1rem;
+      border-bottom: 1px solid var(--btn-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .modal-header h3 {
+      margin: 0;
+      color: var(--text);
+    }
+    
+    .close-btn {
+      background: none;
+      border: none;
+      font-size: 1.5rem;
+      cursor: pointer;
+      color: var(--text);
+      padding: 0;
+      width: 30px;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      transition: background-color 0.2s;
+    }
+    
+    .close-btn:hover {
+      background-color: var(--action-bg);
+    }
+    
+    .modal-body {
+      padding: 1.5rem;
+      max-height: 60vh;
+      overflow-y: auto;
+    }
+    
+    .modal-footer {
+      padding: 1rem 1.5rem;
+      border-top: 1px solid var(--btn-border);
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.5rem;
+    }
+    
+    /* Progress styling */
+    .progress-status {
+      margin-bottom: 1.5rem;
+    }
+    
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+    
+    .status-icon {
+      font-size: 1.2rem;
+    }
+    
+    .status-text {
+      font-weight: 500;
+      color: var(--text);
+    }
+    
+    .command-display {
+      margin-top: 0.75rem;
+      padding: 0.5rem;
+      background-color: var(--bg);
+      border-radius: 6px;
+      border: 1px solid var(--btn-border);
+      font-size: 0.85rem;
+    }
+    
+    .command-label {
+      color: var(--text);
+      margin-right: 0.5rem;
+      font-weight: 500;
+    }
+    
+    .command-text {
+      background-color: var(--code-bg);
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+      color: var(--action-text);
+    }
+    
+    .command-details {
+      margin-top: 0.5rem;
+      padding-top: 0.5rem;
+      border-top: 1px dashed var(--btn-border);
+      font-size: 0.75rem;
+      color: #6b7280;
+    }
+    
+    .detail-item {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    
+    .detail-item code {
+      background-color: var(--code-bg);
+      padding: 0.1rem 0.3rem;
+      border-radius: 4px;
+      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+      color: var(--action-text);
+    }
+    
+    /* Log container styling */
+    .log-container {
+      background-color: var(--code-bg);
+      border-radius: 8px;
+      border: 1px solid var(--btn-border);
+    }
+    
+    .log-header {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--btn-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 500;
+    }
+    
+    .small-btn {
+      padding: 0.25rem 0.5rem;
+      font-size: 0.8rem;
+      background: var(--action-bg);
+      border: 1px solid var(--btn-border);
+      border-radius: 4px;
+      color: var(--action-text);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .small-btn:hover {
+      background: var(--action-bg-hover);
+    }
+    
+    .log-output {
+      padding: 1rem;
+      max-height: 300px;
+      overflow-y: auto;
+      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+      font-size: 0.85rem;
+      line-height: 1.4;
+      color: var(--text);
+      background-color: var(--bg);
+      border-radius: 0 0 8px 8px;
+    }
+    
+    .log-line {
+      margin-bottom: 0.25rem;
+      padding: 0.25rem 0;
+      border-bottom: 1px solid var(--code-bg);
+    }
+    
+    .log-line:last-child {
+      border-bottom: none;
+    }
+    
+    .log-timestamp {
+      color: #6b7280;
+      margin-right: 0.5rem;
+    }
+    
+    .log-line {
+      color: var(--text);
+    }
+    
+    .command-details {
+      margin-top: 0.5rem;
+      padding-top: 0.5rem;
+      border-top: 1px dashed var(--btn-border);
+      font-size: 0.75rem;
+      color: #6b7280;
+    }
+    
+    /* Summary stats styling */
+    .summary-stats {
+      margin-top: 1.5rem;
+      background-color: var(--code-bg);
+      border-radius: 8px;
+      border: 1px solid var(--btn-border);
+    }
+    
+    .stats-header {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--btn-border);
+      font-weight: 500;
+      color: var(--text);
+    }
+    
+    .stats-content {
+      padding: 1rem;
+      background-color: var(--bg);
+      border-radius: 0 0 8px 8px;
+    }
+    
+    .stat-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid var(--code-bg);
+    }
+    
+    .stat-item:last-child {
+      border-bottom: none;
+    }
+    
+    .stat-label {
+      font-weight: 500;
+      color: var(--text);
+    }
+    
+    .stat-value {
+      color: var(--action-text);
+      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+      font-size: 0.9rem;
+    }
   </style>
 </body>
 

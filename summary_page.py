@@ -1,5 +1,8 @@
 import os
 import json
+import subprocess
+import re
+import string
 from pathlib import Path
 from datetime import datetime, date, timezone, timedelta
 
@@ -34,6 +37,15 @@ SUMMARY_DIR = Path(__file__).parent / "summary"  # folder with <arxiv_id>.md
 USER_DATA_DIR = Path(__file__).parent / "user_data"  # persisted read-status
 SUMMARY_DIR.mkdir(exist_ok=True)
 USER_DATA_DIR.mkdir(exist_ok=True)
+
+# -----------------------------------------------------------------------------
+# Admin helpers
+# -----------------------------------------------------------------------------
+
+def is_admin_user(uid: str) -> bool:
+    """Check if the user is an admin based on environment variable."""
+    admin_uids = os.getenv("ADMIN_USER_IDS", "").split(",")
+    return uid.strip() in [admin_id.strip() for admin_id in admin_uids if admin_id.strip()]
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -328,6 +340,9 @@ def index():
     # materialize preview HTML only for current page
     entries = _render_page_entries(page_entries)
 
+    # Get admin users list for template
+    admin_users = [admin_id.strip() for admin_id in os.getenv("ADMIN_USER_IDS", "").split(",") if admin_id.strip()]
+
     resp = make_response(
         render_template_string(
             INDEX_TEMPLATE,
@@ -345,6 +360,7 @@ def index():
             per_page=per_page,
             total_pages=total_pages,
             total_items=total_items,
+            admin_users=admin_users,
         )
     )
     return resp
@@ -487,6 +503,10 @@ def read_papers():
 
     # render only the current page
     entries = _render_page_entries(page_entries)
+    
+    # Get admin users list for template
+    admin_users = [admin_id.strip() for admin_id in os.getenv("ADMIN_USER_IDS", "").split(",") if admin_id.strip()]
+    
     return render_template_string(
         INDEX_TEMPLATE,
         entries=entries,
@@ -502,6 +522,7 @@ def read_papers():
         per_page=per_page,
         total_pages=total_pages,
         total_items=total_items,
+        admin_users=admin_users,
     )
 
 @app.get("/assets/base.css")
@@ -620,6 +641,155 @@ def ingest_event():
         return jsonify({"status": "ok"})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/admin/fetch_latest", methods=["POST"])
+def admin_fetch_latest():
+    """Admin route to fetch latest summaries from RSS feed."""
+    uid = request.cookies.get("uid")
+    if not uid:
+        return jsonify({"error": "no-uid"}), 400
+    
+    if not is_admin_user(uid):
+        return jsonify({"error": "unauthorized"}), 403
+    
+    try:
+        # Run the feed service to fetch latest summaries
+        cmd = ["uv", "run", "python", "feed_paper_summarizer_service.py", "https://papers.takara.ai/api/feed"]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent,
+            timeout=300  # 5 minutes timeout
+        )
+        
+        if result.returncode == 0:
+            # Clear the cache to force refresh of entries
+            global _ENTRIES_CACHE
+            _ENTRIES_CACHE = {
+                "meta": None,
+                "count": 0,
+                "latest_mtime": 0.0,
+            }
+            
+            # Process the output to extract key information
+            stdout_lines = result.stdout.strip().split('\n') if result.stdout else []
+            
+            # Extract summary statistics
+            summary_stats = {}
+            for line in stdout_lines:
+                if "Found" in line and "paper" in line.lower():
+                    summary_stats["papers_found"] = line.strip()
+                elif "successfully" in line.lower():
+                    summary_stats["success_count"] = line.strip()
+                elif "RSS feed updated" in line:
+                    summary_stats["rss_updated"] = line.strip()
+                elif "All done" in line:
+                    summary_stats["completion"] = line.strip()
+            
+            return jsonify({
+                "status": "success",
+                "message": "Latest summaries fetched successfully",
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "summary_stats": summary_stats,
+                "return_code": result.returncode
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "message": f"Feed service failed with return code {result.returncode}",
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "return_code": result.returncode
+            }), 500
+            
+    except subprocess.TimeoutExpired:
+        return jsonify({
+            "status": "error",
+            "message": "Feed service timed out after 5 minutes"
+        }), 500
+    except Exception as exc:
+        return jsonify({
+            "status": "error",
+            "message": f"Failed to run feed service: {str(exc)}"
+        }), 500
+
+
+@app.route("/admin/fetch_latest_stream", methods=["POST"])
+def admin_fetch_latest_stream():
+    """Admin route to stream the feed service output in real-time."""
+    uid = request.cookies.get("uid")
+    if not uid:
+        return jsonify({"error": "no-uid"}), 400
+    
+    if not is_admin_user(uid):
+        return jsonify({"error": "unauthorized"}), 403
+    
+    def generate():
+        try:
+            # Send initial status
+            yield "data: {\"type\": \"status\", \"message\": \"正在启动服务...\", \"icon\": \"⏳\"}\n\n"
+            
+            # Run the feed service with real-time output streaming
+            cmd = ["uv", "run", "python", "feed_paper_summarizer_service.py", "https://papers.takara.ai/api/feed"]
+            
+            # Use Popen to get real-time output
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # Combine stdout and stderr
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                cwd=Path(__file__).parent
+            )
+            
+            # Send status update
+            yield "data: {\"type\": \"status\", \"message\": \"正在连接RSS源...\", \"icon\": \"🔗\"}\n\n"
+            
+            # Stream output in real-time
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    # Just stream the raw output directly
+                    clean_output = output.rstrip()  # Remove trailing newline only
+                    if clean_output:
+                        # Remove all control characters that break JSON
+                        clean_output = ''.join(char for char in clean_output if char in string.printable)
+                        
+                        # Escape only the essential characters for JSON
+                        clean_output = clean_output.replace('\\', '\\\\').replace('"', '\\"')
+                        
+                        yield f"data: {{\"type\": \"log\", \"message\": \"{clean_output}\", \"level\": \"info\"}}\n\n"
+            
+            # Wait for process to complete and get return code
+            return_code = process.poll()
+            
+            # Send completion status
+            if return_code == 0:
+                yield "data: {\"type\": \"status\", \"message\": \"获取成功！\", \"icon\": \"✅\"}\n\n"
+                yield "data: {\"type\": \"complete\", \"status\": \"success\", \"message\": \"最新论文摘要获取成功！\"}\n\n"
+                
+                # Clear the cache to force refresh of entries
+                global _ENTRIES_CACHE
+                _ENTRIES_CACHE = {
+                    "meta": None,
+                    "count": 0,
+                    "latest_mtime": 0.0,
+                }
+            else:
+                yield "data: {\"type\": \"status\", \"message\": \"获取失败\", \"icon\": \"❌\"}\n\n"
+                yield "data: {\"type\": \"complete\", \"status\": \"error\", \"message\": f\"Feed service failed with return code {return_code}\"}\n\n"
+                
+        except Exception as exc:
+            yield f"data: {{\"type\": \"error\", \"message\": \"执行过程中发生错误: {str(exc)}\"}}\n\n"
+            yield "data: {\"type\": \"complete\", \"status\": \"error\", \"message\": \"执行失败\"}\n\n"
+    
+    return Response(generate(), mimetype='text/event-stream')
 
 # -----------------------------------------------------------------------------
 # Entry point
