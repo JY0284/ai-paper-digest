@@ -77,11 +77,11 @@ SESSION = build_session(os.getenv("PROXY_URL", DEFAULT_PROXY_URL))
 
 def resolve_pdf_url(url: str, session: requests.Session = SESSION) -> str:
     """Return a direct PDF link for *url*."""
-    if url.lower().endswith(".pdf"):
-        return url
-
-    if "/papers" in url:
+    if "huggingface.co/papers" in url:
         pdf = url.replace("huggingface.co/papers", "arxiv.org/pdf") + ".pdf"
+        return pdf
+    elif "tldr.takara.ai/p" in url:
+        pdf = url.replace("tldr.takara.ai/p", "arxiv.org/pdf") + ".pdf"
         return pdf
 
     resp = session.get(url, timeout=30)
