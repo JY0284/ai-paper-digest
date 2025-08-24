@@ -16,6 +16,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from pathlib import Path
+import time
 from typing import Iterable, List, Optional, Tuple
 import re
 
@@ -80,6 +81,51 @@ SESSION = build_session()
 
 
 # ---------------------------------------------------------------------------
+# PDF validation helpers
+# ---------------------------------------------------------------------------
+
+def _verify_pdf_integrity(pdf_path: Path) -> bool:
+    """Verify that a PDF file is complete and valid."""
+    try:
+        # Check file size is reasonable (at least 1KB)
+        if pdf_path.stat().st_size < 1024:
+            _LOG.debug("PDF too small to be valid: %s (%d bytes)", pdf_path, pdf_path.stat().st_size)
+            return False
+        
+        # Try to open with PyMuPDF to verify it's a valid PDF
+        if fitz:
+            try:
+                doc = fitz.open(str(pdf_path))
+                page_count = len(doc)
+                doc.close()
+                
+                if page_count == 0:
+                    _LOG.debug("PDF has no pages: %s", pdf_path)
+                    return False
+                    
+                _LOG.debug("PDF validation successful: %s (%d pages)", pdf_path, page_count)
+                return True
+                
+            except Exception as e:
+                _LOG.debug("PDF validation failed with PyMuPDF: %s - %s", pdf_path, e)
+                return False
+        
+        # Fallback: check if file starts with PDF magic number
+        with open(pdf_path, 'rb') as f:
+            header = f.read(8)
+            if header.startswith(b'%PDF-'):
+                _LOG.debug("PDF validation successful (magic number): %s", pdf_path)
+                return True
+            else:
+                _LOG.debug("PDF validation failed (no magic number): %s", pdf_path)
+                return False
+                
+    except Exception as e:
+        _LOG.debug("PDF validation error: %s - %s", pdf_path, e)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Networking helpers
 # ---------------------------------------------------------------------------
 
@@ -105,9 +151,9 @@ def resolve_pdf_url(url: str, session: requests.Session = SESSION) -> str:
 
 
 def download_pdf(
-    pdf_url: str, output_dir: Path = PDF_DIR, session: requests.Session = SESSION
+    pdf_url: str, output_dir: Path = PDF_DIR, session: requests.Session = SESSION, max_retries: int = 3
 ) -> Path:
-    """Download the PDF or skip if already present."""
+    """Download the PDF or skip if already present. Ensures complete downloads only."""
     output_dir.mkdir(parents=True, exist_ok=True)
     filename = pdf_url.rstrip("/").split("/")[-1]
     if not filename.lower().endswith(".pdf"):
@@ -115,27 +161,95 @@ def download_pdf(
     outpath = output_dir / filename
 
     if outpath.exists():
+        # Verify existing PDF is complete and valid
+        if _verify_pdf_integrity(outpath):
+            _LOG.debug("PDF already exists and is valid: %s", outpath)
+            return outpath
+        else:
+            _LOG.warning("Existing PDF appears corrupted, re-downloading: %s", outpath)
+            outpath.unlink()  # Remove corrupted file
+
+        # Retry download logic
+    last_error = None
+    for attempt in range(max_retries):
+        if attempt > 0:
+            _LOG.info("Retry attempt %d/%d for downloading %s", attempt + 1, max_retries, filename)
+            time.sleep(2)  # Brief delay between retries
+        
+        try:
+            return _download_pdf_single_attempt(pdf_url, output_dir, filename, session)
+        except Exception as e:
+            last_error = e
+            _LOG.warning("Download attempt %d failed: %s", attempt + 1, e)
+            continue
+    
+    # All retries failed
+    raise RuntimeError(f"Failed to download PDF after {max_retries} attempts. Last error: {last_error}")
+
+
+def _download_pdf_single_attempt(
+    pdf_url: str, output_dir: Path, filename: str, session: requests.Session
+) -> Path:
+    """Single attempt to download a PDF file."""
+    outpath = output_dir / filename
+    
+    # Download to temporary file first
+    temp_path = output_dir / f"{filename}.tmp"
+    
+    try:
+        resp = session.get(pdf_url, stream=True, timeout=60)
+        resp.raise_for_status()
+
+        total = int(resp.headers.get("content-length", 0))
+        downloaded_size = 0
+        last_progress_time = time.time()
+        
+        with (
+            open(temp_path, "wb") as f,
+            tqdm(
+                desc=f"Downloading {filename}",
+                total=total,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+            ) as bar,
+        ):
+            for chunk in resp.iter_content(2048):
+                if chunk:  # Filter out keep-alive chunks
+                    f.write(chunk)
+                    downloaded_size += len(chunk)
+                    bar.update(len(chunk))
+                    
+                    # Check for progress timeout (stalled download)
+                    current_time = time.time()
+                    if current_time - last_progress_time > 30:  # 30 seconds without progress
+                        raise TimeoutError("Download stalled - no progress for 30 seconds")
+                    last_progress_time = current_time
+        
+        # Verify download completeness
+        if total > 0 and downloaded_size != total:
+            raise ValueError(f"Download incomplete: expected {total} bytes, got {downloaded_size} bytes")
+        
+        # Verify PDF integrity before moving to final location
+        if not _verify_pdf_integrity(temp_path):
+            raise ValueError("Downloaded PDF failed integrity check")
+        
+        # Move temporary file to final location
+        temp_path.rename(outpath)
+        _LOG.info("PDF downloaded successfully: %s (%d bytes)", outpath, downloaded_size)
+        
         return outpath
-
-    resp = session.get(pdf_url, stream=True, timeout=60)
-    resp.raise_for_status()
-
-    total = int(resp.headers.get("content-length", 0))
-    with (
-        open(outpath, "wb") as f,
-        tqdm(
-            desc=f"Downloading {filename}",
-            total=total,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-        ) as bar,
-    ):
-        for chunk in resp.iter_content(2048):
-            f.write(chunk)
-            bar.update(len(chunk))
-
-    return outpath
+        
+    except Exception as e:
+        # Clean up temporary file on any error
+        if temp_path.exists():
+            temp_path.unlink()
+        _LOG.error("Failed to download PDF %s: %s", pdf_url, e)
+        raise
+    finally:
+        # Ensure temporary file is cleaned up
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 # ---------------------------------------------------------------------------

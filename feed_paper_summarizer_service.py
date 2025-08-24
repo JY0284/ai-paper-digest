@@ -145,6 +145,30 @@ def _setup_logging(debug: bool) -> None:
             logger.addHandler(logging.NullHandler())
             logger.propagate = False
 
+# Helper – PDF cleanup and validation
+# ---------------------------------------------------------------------------
+
+def _cleanup_corrupted_pdfs():
+    """Clean up any corrupted PDF files that might exist."""
+    papers_dir = ps.PDF_DIR  # type: ignore[attr-defined]
+    if not papers_dir.exists():
+        return
+    
+    corrupted_count = 0
+    for pdf_file in papers_dir.glob("*.pdf"):
+        try:
+            # Try to validate the PDF
+            if not ps._verify_pdf_integrity(pdf_file):  # type: ignore[attr-defined]
+                _LOG.warning("Removing corrupted PDF: %s", pdf_file)
+                pdf_file.unlink()
+                corrupted_count += 1
+        except Exception as e:
+            _LOG.warning("Error checking PDF %s: %s", pdf_file, e)
+    
+    if corrupted_count > 0:
+        _LOG.info("Cleaned up %d corrupted PDF files", corrupted_count)
+
+
 # Helper – wrap the paper_summarizer pipeline for a single URL
 # ---------------------------------------------------------------------------
 
@@ -239,7 +263,7 @@ def _summarize_url(
 
     except Exception as exc:  # pylint: disable=broad-except
         _LOG.error("❌  %s – %s", url, exc)
-        # _LOG.exception(exc)
+        _LOG.exception(exc)
         return None, None, None
 
 # ---------------------------------------------------------------------------
@@ -382,6 +406,9 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
 
     _LOG.info("🚀  feed_paper_summarizer_service %s", __version__)
 
+    # Clean up any corrupted PDFs that might exist
+    _cleanup_corrupted_pdfs()
+
     # Proxy support – rebuild the session inside paper_summarizer if needed
     if args.proxy:
         ps.SESSION = ps.build_session(args.proxy)  # type: ignore[attr-defined]
@@ -437,7 +464,7 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
                 provider=args.provider,
                 ollama_base_url=args.ollama_base_url,
                 ollama_model=args.ollama_model,
-                max_input_char=args.max_input_char,
+                max_input_char=int(args.max_input_char),
                 extract_only=args.extract_only,
             ): idx
             for idx, link in enumerate(links)
@@ -505,7 +532,7 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
 
         # Set the feed details (if not already set)
         fg.title('Research Paper Summaries')
-        fg.link(href='https://yourwebsite.com')  # Your site or feed URL
+        fg.link(href='https://www.wawuyu.com')  # Your site or feed URL
         fg.description('Summaries of research papers')
 
         if args.rebuild:
