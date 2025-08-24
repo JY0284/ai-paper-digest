@@ -402,7 +402,15 @@ def llm_invoke(
             prompt = "\n\n".join([f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {m.content}" for m in messages])
         
         response = llm.invoke(prompt)
-        return AIMessage(content=response)
+        
+        # Clean up Ollama response to extract only the actual output
+        # Ollama may include <think> tags mixed with output, unlike DeepSeek Chat
+        cleaned_content = response
+        if isinstance(cleaned_content, str):
+            # Remove <think>...</think> blocks
+            cleaned_content = re.sub(r'<think>.*?</think>', '', cleaned_content, flags=re.DOTALL)
+        
+        return AIMessage(content=cleaned_content)
         
     else:
         # Use DeepSeek (default)
@@ -509,6 +517,10 @@ def generate_tags_from_summary(
     resp = llm_invoke([HumanMessage(content=tmpl)], api_key=api_key, provider=provider,
                      ollama_base_url=ollama_base_url, ollama_model=ollama_model)
     raw = (resp.content or "").strip()
+
+    # Clean up any <think> tags that might appear in Ollama output
+    if provider.lower() == "ollama":
+        raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL)
 
     # Strip fenced code blocks if present, e.g., ```json ... ``` or ``` ... ```
     fenced_match = re.search(r"```(?:json|\w+)?\s*([\s\S]*?)\s*```", raw, re.IGNORECASE)
