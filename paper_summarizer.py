@@ -31,6 +31,7 @@ from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langchain_core.prompts import PromptTemplate
 from langchain_deepseek import ChatDeepSeek
 from langchain_ollama import OllamaLLM
+from langchain_openai import ChatOpenAI
 from tqdm import tqdm
 
 
@@ -45,9 +46,10 @@ CHUNK_OVERLAP_RATIO = 0.05
 DEFAULT_PROXY_URL = "socks5://127.0.0.1:1081"
 
 # LLM Provider configuration
-DEFAULT_LLM_PROVIDER = "deepseek"  # "deepseek" or "ollama"
+DEFAULT_LLM_PROVIDER = "deepseek"  # "deepseek", "ollama", or "openai"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "qwen3:8b"
+DEFAULT_OPENAI_MODEL = "gpt-3.5-turbo"  # Default model for OpenAI-compatible APIs
 
 # Directories for caching
 BASE_DIR = Path(__file__).parent
@@ -138,6 +140,8 @@ def resolve_pdf_url(url: str, session: requests.Session = SESSION) -> str:
     elif "tldr.takara.ai/p" in url:
         pdf = url.replace("tldr.takara.ai/p", "arxiv.org/pdf") + ".pdf"
         return pdf
+    elif url.endswith(".pdf"):
+        return url
 
     resp = session.get(url, timeout=30)
     resp.raise_for_status()
@@ -151,7 +155,7 @@ def resolve_pdf_url(url: str, session: requests.Session = SESSION) -> str:
 
 
 def download_pdf(
-    pdf_url: str, output_dir: Path = PDF_DIR, session: requests.Session = SESSION, max_retries: int = 3
+    pdf_url: str, output_dir: Path = PDF_DIR, session: requests.Session = SESSION, max_retries: int = 3, skip_download: bool = False
 ) -> Path:
     """Download the PDF or skip if already present. Ensures complete downloads only."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -159,6 +163,9 @@ def download_pdf(
     if not filename.lower().endswith(".pdf"):
         filename += ".pdf"
     outpath = output_dir / filename
+
+    if skip_download:
+        return outpath
 
     if outpath.exists():
         # Verify existing PDF is complete and valid
@@ -373,25 +380,23 @@ def llm_invoke(
     api_key: Optional[str] = None, 
     base_url: Optional[str] = None,
     provider: str = DEFAULT_LLM_PROVIDER,
-    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
-    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    model: str = None,
     **kwargs
 ) -> AIMessage:
-    """Invoke LLM with support for both DeepSeek and Ollama providers."""
+    """Invoke LLM with support for DeepSeek, Ollama, and OpenAI-compatible providers."""
     
     if provider.lower() == "ollama":
         # Use Ollama
-        if not ollama_base_url:
-            ollama_base_url = os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
-        if not ollama_model:
-            ollama_model = os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+        if not base_url:
+            base_url = os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
+        if not model:
+            model = os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
             
-        _LOG.debug("Using Ollama provider: %s at %s", ollama_model, ollama_base_url)
+        _LOG.debug("Using Ollama provider: %s at %s", model, base_url)
         
         llm = OllamaLLM(
-            model=ollama_model,
-            base_url=ollama_base_url,
-            temperature=0,
+            model=model,
+            base_url=base_url,
             timeout=120,  # Ollama can be slower
         )
         
@@ -413,6 +418,30 @@ def llm_invoke(
         
         return AIMessage(content=cleaned_content)
         
+    elif provider.lower() == "openai":
+        # Use OpenAI-compatible API (including DeepSeek, Anthropic, etc.)
+        if not api_key:
+            api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OpenAI API key required. Set OPENAI_API_KEY environment variable or pass --api-key")
+            
+        if not base_url:
+            base_url = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+        if not model:
+            model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+            
+        _LOG.debug("Using OpenAI-compatible provider: %s at %s", model, base_url)
+        
+        llm = ChatOpenAI(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            max_tokens=None,
+            timeout=120,
+            max_retries=2,
+        )
+        return llm.invoke(messages)
+        
     else:
         # Use DeepSeek (default)
         if not api_key:
@@ -424,12 +453,11 @@ def llm_invoke(
         
         llm = ChatDeepSeek(
             model=MODEL_NAME,
-            temperature=0,
             max_tokens=None,
             timeout=None,
             max_retries=2,
             api_key=api_key,
-            base_url=base_url,
+            api_base=base_url,
         )
         return llm.invoke(messages)
 
@@ -441,8 +469,7 @@ def progressive_summary(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     provider: str = DEFAULT_LLM_PROVIDER,
-    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
-    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    model: str = None,
     max_workers: int = 4,
 ) -> Tuple[str, str]:
     if summary_path.exists():
@@ -459,8 +486,7 @@ def progressive_summary(
                 os.path.join("prompts", "chunk_summary.md"), encoding="utf-8"
             ).format(chunk_content=chunk)
         )
-        resp = llm_invoke([msg], api_key=api_key, base_url=base_url, provider=provider, 
-                         ollama_base_url=ollama_base_url, ollama_model=ollama_model)
+        resp = llm_invoke([msg], api_key=api_key, base_url=base_url, provider=provider, model=model)
         return idx, resp.content
 
     if not chunk_summary_path.exists():
@@ -490,8 +516,7 @@ def progressive_summary(
         api_key=api_key,
         base_url=base_url,
         provider=provider,
-        ollama_base_url=ollama_base_url,
-        ollama_model=ollama_model,
+        model=model,
     )
 
     return final.content, joined
@@ -507,8 +532,7 @@ def generate_tags_from_summary(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     provider: str = DEFAULT_LLM_PROVIDER,
-    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
-    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    model: str = None,
     max_tags: int = 8,
 ) -> dict:
     """Generate AI-aware top-level and detailed tags using the LLM.
@@ -519,8 +543,7 @@ def generate_tags_from_summary(
         os.path.join("prompts", "tags.md"), encoding="utf-8"
     ).format(summary_content=summary_text)
 
-    resp = llm_invoke([HumanMessage(content=tmpl)], api_key=api_key, base_url=base_url, provider=provider,
-                     ollama_base_url=ollama_base_url, ollama_model=ollama_model)
+    resp = llm_invoke([HumanMessage(content=tmpl)], api_key=api_key, base_url=base_url, provider=provider, model=model)
     raw = (resp.content or "").strip()
 
     # Clean up any <think> tags that might appear in Ollama output

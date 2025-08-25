@@ -13,6 +13,12 @@
 - **智能标签系统**：自动提取论文主题标签，支持多级分类
 - **并行处理**：多线程并发处理，批量生成摘要效率高
 
+### 🆕 最新更新 (v0.2.0+)
+- **OpenAI兼容API支持**：新增对任何OpenAI兼容API的完整支持
+- **DeepSeek API兼容性修复**：解决LangChain DeepSeek集成问题
+- **多提供商无缝切换**：支持OpenAI、DeepSeek、Anthropic等主流API
+- **增强的错误处理**：更友好的错误提示和故障排除指南
+
 ### 🌐 现代化Web界面
 - **响应式设计**：支持桌面和移动设备
 - **智能筛选**：基于标签和关键词的论文筛选
@@ -125,7 +131,7 @@ ADMIN_USER_IDS="admin" python summary_page.py
 
 ### 基础使用
 
-#### 1. 从RSS源获取论文摘要
+#### 1. 从RSS源获取论文摘要（默认使用DeepSeek）
 ```bash
 python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed \
   --workers 4 \
@@ -148,8 +154,10 @@ python feed_paper_summarizer_service.py --rebuild \
 #### 4. 仅生成标签（使用OpenAI兼容API）
 ```bash
 python feed_paper_summarizer_service.py --tags-only \
+  --provider openai \
   --base-url https://api.openai.com/v1 \
-  --api-key YOUR_OPENAI_API_KEY
+  --api-key YOUR_OPENAI_API_KEY \
+  --model gpt-3.5-turbo
 ```
 
 #### 5. 仅提取PDF文本（不进行LLM摘要）
@@ -162,7 +170,10 @@ python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed \
 ## 📖 使用指南
 
 ### 命令行参数
-- `--api-key`：AI模型API密钥（支持DeepSeek、OpenAI等）
+- `--provider`：LLM提供商选择（deepseek、ollama、openai）
+- `--api-key`：API密钥
+- `--base-url`：API基础URL
+- `--model`：模型名称
 - `--workers`：并行处理线程数（默认：CPU核心数）
 - `--output`：汇总摘要输出文件
 - `--output_rss_path`：RSS文件输出路径
@@ -211,6 +222,54 @@ python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed \
 - **Ollama**：支持本地部署的Ollama服务
 - **自定义配置**：可通过`--base-url`参数指定自定义API端点
 
+#### 🔌 支持的LLM提供商详解
+
+**1. DeepSeek (默认)**
+- 使用 `--provider deepseek` 或默认
+- 需要设置 `DEEPSEEK_API_KEY` 环境变量或 `--api-key` 参数
+- 支持模型：deepseek-chat 等
+
+**2. OpenAI兼容API (推荐)**
+- 使用 `--provider openai`
+- 支持任何兼容OpenAI接口的API服务
+- 通过 `--base-url` 指定API端点
+- 通过 `--model` 指定模型名称
+
+**3. Ollama (本地部署)**
+- 使用 `--provider ollama`
+- 通过 `--base-url` 指定服务地址
+- 通过 `--model` 指定模型名称
+- 支持本地或远程Ollama服务
+
+### 🎯 统一配置方式
+
+系统采用统一的配置方式，根据 `--provider` 参数自动选择合适的默认值：
+
+| 提供商 | 默认Base URL | 默认模型 | 说明 |
+|--------|-------------|----------|------|
+| `deepseek` | `https://api.deepseek.com/v1` | `deepseek-chat` | DeepSeek官方API |
+| `openai` | `https://api.openai.com/v1` | `gpt-3.5-turbo` | OpenAI兼容API |
+| `ollama` | `http://localhost:11434` | `qwen3:8b` | Ollama本地服务 |
+
+**使用示例：**
+```bash
+# 使用默认配置(DeepSeek)
+无需专门指定provider
+
+# 自定义配置
+--provider openai --base-url https://api.anthropic.com/v1 --model claude-3-sonnet-20240229
+
+# 使用Ollama
+--provider ollama --base-url http://127.0.0.1:11434 --model qwen3:8b
+```
+
+**支持的API服务包括：**
+- **OpenAI官方API**：`--base-url https://api.openai.com/v1`
+- **Anthropic Claude**：`--base-url https://api.anthropic.com/v1`
+- **其他兼容服务**：任何遵循OpenAI接口规范的API
+
+
+
 ### 缓存策略
 - **PDF缓存**：避免重复下载
 - **Markdown缓存**：保存提取的文本
@@ -240,6 +299,21 @@ python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed \
 - **并发能力**：支持多线程并行处理
 - **缓存效率**：避免重复计算，提升响应速度
 - **内存优化**：分块处理大文档，控制内存使用
+
+## 🔧 环境变量配置（若启动命令中未指定将使用环境变量）
+
+```bash
+# DeepSeek API
+export DEEPSEEK_API_KEY="your-deepseek-api-key"
+
+# OpenAI API
+export OPENAI_API_KEY="your-openai-api-key"
+export OPENAI_API_BASE="https://api.openai.com/v1"
+
+# Ollama
+export OLLAMA_BASE_URL="http://localhost:11434"
+export OLLAMA_MODEL="qwen3:8b"
+```
 
 ## 🤝 贡献指南
 
