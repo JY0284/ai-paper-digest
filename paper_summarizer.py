@@ -371,6 +371,7 @@ def chunk_text(
 def llm_invoke(
     messages: List[BaseMessage], 
     api_key: Optional[str] = None, 
+    base_url: Optional[str] = None,
     provider: str = DEFAULT_LLM_PROVIDER,
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
@@ -428,6 +429,7 @@ def llm_invoke(
             timeout=None,
             max_retries=2,
             api_key=api_key,
+            base_url=base_url,
         )
         return llm.invoke(messages)
 
@@ -437,6 +439,7 @@ def progressive_summary(
     summary_path: Path,
     chunk_summary_path: Path,
     api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
     provider: str = DEFAULT_LLM_PROVIDER,
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
@@ -456,7 +459,7 @@ def progressive_summary(
                 os.path.join("prompts", "chunk_summary.md"), encoding="utf-8"
             ).format(chunk_content=chunk)
         )
-        resp = llm_invoke([msg], api_key=api_key, provider=provider, 
+        resp = llm_invoke([msg], api_key=api_key, base_url=base_url, provider=provider, 
                          ollama_base_url=ollama_base_url, ollama_model=ollama_model)
         return idx, resp.content
 
@@ -485,6 +488,7 @@ def progressive_summary(
             HumanMessage(joined),
         ],
         api_key=api_key,
+        base_url=base_url,
         provider=provider,
         ollama_base_url=ollama_base_url,
         ollama_model=ollama_model,
@@ -501,6 +505,7 @@ def progressive_summary(
 def generate_tags_from_summary(
     summary_text: str,
     api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
     provider: str = DEFAULT_LLM_PROVIDER,
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
@@ -514,7 +519,7 @@ def generate_tags_from_summary(
         os.path.join("prompts", "tags.md"), encoding="utf-8"
     ).format(summary_content=summary_text)
 
-    resp = llm_invoke([HumanMessage(content=tmpl)], api_key=api_key, provider=provider,
+    resp = llm_invoke([HumanMessage(content=tmpl)], api_key=api_key, base_url=base_url, provider=provider,
                      ollama_base_url=ollama_base_url, ollama_model=ollama_model)
     raw = (resp.content or "").strip()
 
@@ -613,6 +618,7 @@ def main() -> None:
     )
     parser.add_argument("url", help="Paper URL (PDF or landing page)")
     parser.add_argument("--api-key", help="DeepSeek/OpenAI API key")
+    parser.add_argument("--base-url", help="Base URL for OpenAI-compatible LLM API (e.g., https://api.openai.com/v1)")
     parser.add_argument("--provider", choices=["deepseek", "ollama"], default=DEFAULT_LLM_PROVIDER,
                        help=f"LLM provider to use (default: {DEFAULT_LLM_PROVIDER})")
     parser.add_argument("--ollama-base-url", default=DEFAULT_OLLAMA_BASE_URL,
@@ -650,7 +656,7 @@ def main() -> None:
         summary_path = SUMMARY_DIR / (pdf_path.stem + ".md")
         summary = progressive_summary(
             chunks, summary_path=summary_path, api_key=args.api_key,
-            provider=args.provider, ollama_base_url=args.ollama_base_url, 
+            base_url=args.base_url, provider=args.provider, ollama_base_url=args.ollama_base_url, 
             ollama_model=args.ollama_model
         )
         summary_path.write_text(summary.content, encoding="utf-8")

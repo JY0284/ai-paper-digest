@@ -181,6 +181,7 @@ def extract_first_header(markdown_text):
 def _summarize_url(
     url: str,
     api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
     provider: str = "deepseek",
     ollama_base_url: str = "http://localhost:11434",
     ollama_model: str = "qwen2.5:7b",
@@ -227,7 +228,7 @@ def _summarize_url(
                     _LOG.info("🏷️  Backfilling tags for %s…", pdf_path.stem)
                     summary_text = summary_path.read_text(encoding="utf-8", errors="ignore")
                     tag_raw = ps.generate_tags_from_summary(summary_text, api_key=api_key, 
-                                                          provider=provider, ollama_base_url=ollama_base_url, 
+                                                          base_url=base_url, provider=provider, ollama_base_url=ollama_base_url, 
                                                           ollama_model=ollama_model)  # type: ignore[attr-defined]
                     tag_obj = tag_raw if isinstance(tag_raw, dict) else {"tags": list(tag_raw or []), "top": []}
                     tags_path.write_text(json.dumps(tag_obj, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -239,7 +240,7 @@ def _summarize_url(
         logging.info(f"Start summarizing {md_path}...")
         summary, chunks_summary = ps.progressive_summary(  # type: ignore[attr-defined]
             chunks, summary_path=summary_path, chunk_summary_path=chunks_summary_out_path, api_key=api_key,
-            provider=provider, ollama_base_url=ollama_base_url, ollama_model=ollama_model
+            base_url=base_url, provider=provider, ollama_base_url=ollama_base_url, ollama_model=ollama_model
         )
 
         chunks_summary_out_path.write_text(chunks_summary, encoding="utf-8")
@@ -249,7 +250,7 @@ def _summarize_url(
         try:
             _LOG.info("🏷️  Generating tags for %s…", pdf_path.stem)
             tag_raw = ps.generate_tags_from_summary(summary, api_key=api_key, 
-                                                  provider=provider, ollama_base_url=ollama_base_url, 
+                                                  base_url=base_url, provider=provider, ollama_base_url=ollama_base_url, 
                                                   ollama_model=ollama_model)  # type: ignore[attr-defined]
             tag_obj = tag_raw if isinstance(tag_raw, dict) else {"tags": list(tag_raw or []), "top": []}
             tags_path = ps.SUMMARY_DIR / (pdf_path.stem + ".tags.json")  # type: ignore[attr-defined]
@@ -304,7 +305,7 @@ def _collect_local_links() -> List[str]:
 # Tags-only helper
 # ---------------------------------------------------------------------------
 
-def _tags_only_run() -> tuple[int, int]:
+def _tags_only_run(provider: str = "deepseek", ollama_base_url: str = "http://localhost:11434", ollama_model: str = "qwen3:8b") -> tuple[int, int]:
     """Generate tags for existing summaries only.
 
     Returns a tuple of (total_summaries, updated_count). Only summaries missing
@@ -337,9 +338,9 @@ def _tags_only_run() -> tuple[int, int]:
             paper_id = md_path.stem
             _LOG.info("🏷️  Generating tags for %s…", paper_id)
             summary_text = md_path.read_text(encoding="utf-8", errors="ignore")
-            tags = ps.generate_tags_from_summary(summary_text, provider=args.provider,
-                                               ollama_base_url=args.ollama_base_url,
-                                               ollama_model=args.ollama_model)  # type: ignore[attr-defined]
+            tags = ps.generate_tags_from_summary(summary_text, provider=provider,
+                                               ollama_base_url=ollama_base_url,
+                                               ollama_model=ollama_model)  # type: ignore[attr-defined]
             tags_path.write_text(json.dumps({"tags": tags}, ensure_ascii=False, indent=2), encoding="utf-8")
             _LOG.info("✅  Saved %d tag(s) for %s", len(tags), paper_id)
             updated += 1
@@ -378,6 +379,7 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:  # noqa: D
     )
     p.add_argument("rss_url", nargs="?", default="", help="RSS feed URL (HuggingFace papers feed, ArXiv RSS, etc.)")
     p.add_argument("--api-key", dest="api_key", help="DeepSeek API key")
+    p.add_argument("--base-url", dest="base_url", help="Base URL for OpenAI-compatible LLM API (e.g., https://api.openai.com/v1)")
     p.add_argument("--provider", choices=["deepseek", "ollama"], default="deepseek",
                    help="LLM provider to use (default: deepseek)")
     p.add_argument("--ollama-base-url", default="http://localhost:11434",
@@ -416,7 +418,7 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
 
     # Short-circuit: tags-only generation
     if args.tags_only:
-        _tags_only_run()
+        _tags_only_run(provider=args.provider, ollama_base_url=args.ollama_base_url, ollama_model=args.ollama_model)
         _LOG.info("✨  All done (tags-only).")
         # Clean up the log listener
         if _log_listener:
@@ -461,6 +463,7 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
                 _summarize_url,
                 link,
                 api_key=args.api_key,
+                base_url=args.base_url,
                 provider=args.provider,
                 ollama_base_url=args.ollama_base_url,
                 ollama_model=args.ollama_model,
@@ -650,6 +653,9 @@ if __name__ == "__main__":  # pragma: no cover
 # Regular mode with DeepSeek LLM (default):
 #   uv run python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed --workers 2
 #
+# Regular mode with OpenAI-compatible API:
+#   uv run python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed --base-url https://api.openai.com/v1 --api-key your-api-key --workers 2
+#
 # Regular mode with Ollama LLM:
 #   uv run python feed_paper_summarizer_service.py https://papers.takara.ai/api/feed --provider ollama --ollama-base-url http://192.168.31.192:11434 --ollama-model qwen3:8b --workers 2
 #
@@ -658,3 +664,6 @@ if __name__ == "__main__":  # pragma: no cover
 #
 # Tags-only mode (only generate tags for existing summaries):
 #   uv run python feed_paper_summarizer_service.py --tags-only --provider ollama --ollama-base-url http://192.168.31.192:11434 --ollama-model qwen3:8b
+#
+# Tags-only mode with OpenAI-compatible API:
+#   uv run python feed_paper_summarizer_service.py --tags-only --base-url https://api.openai.com/v1 --api-key your-api-key

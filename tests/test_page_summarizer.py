@@ -126,7 +126,7 @@ def test_llm_invoke(monkeypatch):
 
     monkeypatch.setattr(paper_summarizer, 'ChatDeepSeek', DummyLLM)
     msg = HumanMessage(content='hi')
-    resp = llm_invoke([msg], api_key='key')
+    resp = llm_invoke([msg], api_key='key', base_url=None)
     assert isinstance(resp, AIMessage)
     assert resp.content == 'resp'
 
@@ -146,7 +146,7 @@ def test_progressive_summary(monkeypatch, tmp_path):
     if debug_dir.exists():
         for f in debug_dir.iterdir(): f.unlink()
 
-    summary, chunks_summary = progressive_summary(['a', 'b'], summary_path=tmp_path/'summary.md', chunk_summary_path=tmp_path/'chunks.md', api_key='key', max_workers=1)
+    summary, chunks_summary = progressive_summary(['a', 'b'], summary_path=tmp_path/'summary.md', chunk_summary_path=tmp_path/'chunks.md', api_key='key', base_url=None, max_workers=1)
     assert summary == 'FINAL'
     assert chunks_summary == '\n\n'.join(['CHUNK'] * 2)
     # two chunk calls + one final

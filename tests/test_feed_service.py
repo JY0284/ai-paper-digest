@@ -89,13 +89,13 @@ def test_summarize_url_success(monkeypatch, tmp_path: Path):
 
         @staticmethod
         def progressive_summary(
-            chunks, summary_path, chunk_summary_path, api_key=None
+            chunks, summary_path, chunk_summary_path, api_key=None, base_url=None, provider=None, ollama_base_url=None, ollama_model=None
         ):  # noqa: D401
             os.makedirs(DummyPS.CHUNKS_SUMMARY_DIR, exist_ok=True)
             return "the-summary", "the-chunks-summary"
 
         @staticmethod
-        def generate_tags_from_summary(summary, api_key=None):  # noqa: D401
+        def generate_tags_from_summary(summary, api_key=None, base_url=None, provider=None, ollama_base_url=None, ollama_model=None):  # noqa: D401
             return ["llm", "reasoning"]
 
     # Inject dummy ps module into svc
@@ -142,7 +142,7 @@ def test_summarize_url_backfills_tags_on_cached_summary(monkeypatch, tmp_path: P
             return [text]
 
         @staticmethod
-        def generate_tags_from_summary(summary, api_key=None):
+        def generate_tags_from_summary(summary, api_key=None, base_url=None, provider=None, ollama_base_url=None, ollama_model=None):
             return ["cached"]
 
     # Pre-create cached summary so the service takes the cached path branch
@@ -214,7 +214,7 @@ def test_tags_only_run(monkeypatch, tmp_path: Path):
         SUMMARY_DIR = tmp_path
 
         @staticmethod
-        def generate_tags_from_summary(summary, api_key=None):
+        def generate_tags_from_summary(summary, api_key=None, base_url=None, provider=None, ollama_base_url=None, ollama_model=None):
             return ["t1", "t2"]
 
     monkeypatch.setattr(svc, "ps", DummyPS)
