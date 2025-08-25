@@ -555,7 +555,30 @@
       })
       .catch(error => {
         console.error('Fetch error:', error);
-        addLogEntry('❌ 连接错误，请检查网络连接', 'error');
+        
+        // Provide more specific error messages
+        let errorMessage = '❌ 连接错误，请检查网络连接';
+        let errorType = 'error';
+        
+        if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
+          errorMessage = '❌ 无法连接到服务器，请检查服务是否正在运行';
+          errorType = 'error';
+        } else if (error.name === 'AbortError') {
+          errorMessage = '⏹️ 请求被取消';
+          errorType = 'warning';
+        } else if (error.message.includes('timeout')) {
+          errorMessage = '⏰ 连接超时，请检查网络速度';
+          errorType = 'warning';
+        } else if (error.message.includes('NetworkError')) {
+          errorMessage = '🌐 网络错误，请检查网络连接';
+          errorType = 'error';
+        }
+        
+        addLogEntry(errorMessage, errorType);
+        
+        // Add debugging information
+        addLogEntry(`🔍 错误详情: ${error.name}: ${error.message}`, 'info');
+
         statusText.textContent = '连接失败';
         statusIcon.textContent = '❌';
       });

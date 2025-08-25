@@ -732,8 +732,31 @@ def admin_fetch_latest_stream():
             # Send initial status
             yield "data: {\"type\": \"status\", \"message\": \"正在启动服务...\", \"icon\": \"⏳\"}\n\n"
             
-            # Run the feed service with real-time output streaming
-            cmd = ["uv", "run", "python", "feed_paper_summarizer_service.py", "https://papers.takara.ai/api/feed"]
+            # Cross-platform command execution
+            import platform
+            import shutil
+            
+            # Check if uv is available, fallback to python if not
+            uv_path = shutil.which("uv")
+            python_path = shutil.which("python")
+            
+            if not python_path:
+                python_path = shutil.which("python3")
+            
+            if not python_path:
+                yield "data: {\"type\": \"error\", \"message\": \"Python not found in PATH\"}\n\n"
+                yield "data: {\"type\": \"complete\", \"status\": \"error\", \"message\": \"Python环境未配置\"}\n\n"
+                return
+            
+            # Build command based on available tools
+            if uv_path and platform.system() != "Windows":
+                # Use uv on Unix-like systems
+                cmd = ["uv", "run", "python", "feed_paper_summarizer_service.py", "https://papers.takara.ai/api/feed"]
+            else:
+                # Fallback to direct python execution
+                cmd = [python_path, "feed_paper_summarizer_service.py", "https://papers.takara.ai/api/feed"]
+            
+            yield f"data: {{\"type\": \"log\", \"message\": \"执行命令: {' '.join(cmd)}\", \"level\": \"info\"}}\n\n"
             
             # Use Popen to get real-time output
             process = subprocess.Popen(
@@ -743,7 +766,9 @@ def admin_fetch_latest_stream():
                 text=True,
                 bufsize=1,
                 universal_newlines=True,
-                cwd=Path(__file__).parent
+                cwd=Path(__file__).parent,
+                # Windows-specific settings
+                creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
             )
             
             # Send status update
@@ -782,11 +807,21 @@ def admin_fetch_latest_stream():
                     "latest_mtime": 0.0,
                 }
             else:
+                yield f"data: {{\"type\": \"log\", \"message\": \"进程返回码: {return_code}\", \"level\": \"error\"}}\n\n"
                 yield "data: {\"type\": \"status\", \"message\": \"获取失败\", \"icon\": \"❌\"}\n\n"
                 yield "data: {\"type\": \"complete\", \"status\": \"error\", \"message\": f\"Feed service failed with return code {return_code}\"}\n\n"
                 
+        except FileNotFoundError as e:
+            error_msg = f"文件未找到: {str(e)}"
+            yield f"data: {{\"type\": \"error\", \"message\": \"{error_msg}\"}}\n\n"
+            yield "data: {\"type\": \"complete\", \"status\": \"error\", \"message\": \"文件路径错误\"}\n\n"
+        except PermissionError as e:
+            error_msg = f"权限错误: {str(e)}"
+            yield f"data: {{\"type\": \"error\", \"message\": \"{error_msg}\"}}\n\n"
+            yield "data: {\"type\": \"complete\", \"status\": \"error\", \"message\": \"权限不足\"}\n\n"
         except Exception as exc:
-            yield f"data: {{\"type\": \"error\", \"message\": \"执行过程中发生错误: {str(exc)}\"}}\n\n"
+            error_msg = f"执行过程中发生错误: {str(exc)}"
+            yield f"data: {{\"type\": \"error\", \"message\": \"{error_msg}\"}}\n\n"
             yield "data: {\"type\": \"complete\", \"status\": \"error\", \"message\": \"执行失败\"}\n\n"
     
     return Response(generate(), mimetype='text/event-stream')
