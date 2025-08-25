@@ -626,11 +626,6 @@ def main(argv: List[str] | None = None) -> None:  # noqa: D401
         _LOG.info(f"📢 RSS feed updated: {len(new_items)} new items added, {total_entries} total items in feed")
 
     _LOG.info("✨  All done!")
-    
-    # Clean up the log listener
-    if _log_listener:
-        _log_listener.stop()
-        _log_listener = None
 
 
 if __name__ == "__main__":  # pragma: no cover
