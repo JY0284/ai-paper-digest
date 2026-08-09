@@ -199,7 +199,7 @@ function renderStats() {
             </div>
             
             <div class="chart-box full-width">
-                <h3>${s.time_title ? s.time_title[currentLang] : ''}</h3>
+                <h3>${s.time_title[currentLang]}</h3>
                 <div class="time-chart">
                     ${timeHtml}
                 </div>
